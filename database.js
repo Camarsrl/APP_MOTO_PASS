@@ -1,0 +1,105 @@
+const { Pool } = require('pg');
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+// Crea tutte le tabelle necessarie
+const initDatabase = async () => {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      -- TABELLA UTENTI (passeggeri e conducenti)
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(100) NOT NULL,
+        cognome VARCHAR(100) NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        telefono VARCHAR(20) NOT NULL,
+        ruolo VARCHAR(20) NOT NULL CHECK (ruolo IN ('passeggero', 'conducente')),
+        foto_profilo VARCHAR(500),
+        stripe_customer_id VARCHAR(255),
+        stripe_account_id VARCHAR(255),
+        attivo BOOLEAN DEFAULT true,
+        creato_il TIMESTAMP DEFAULT NOW()
+      );
+
+      -- TABELLA CONDUCENTI (dati aggiuntivi)
+      CREATE TABLE IF NOT EXISTS conducenti (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        numero_patente VARCHAR(50) NOT NULL,
+        tipo_patente VARCHAR(10) NOT NULL,
+        targa_moto VARCHAR(20) NOT NULL,
+        marca_moto VARCHAR(100),
+        modello_moto VARCHAR(100),
+        foto_patente VARCHAR(500),
+        foto_documento VARCHAR(500),
+        iban VARCHAR(50),
+        verificato BOOLEAN DEFAULT false,
+        disponibile BOOLEAN DEFAULT false,
+        latitudine DECIMAL(10, 8),
+        longitudine DECIMAL(11, 8),
+        valutazione_media DECIMAL(3,2) DEFAULT 5.00,
+        totale_corse INTEGER DEFAULT 0
+      );
+
+      -- TABELLA CORSE
+      CREATE TABLE IF NOT EXISTS corse (
+        id SERIAL PRIMARY KEY,
+        passeggero_id INTEGER REFERENCES users(id),
+        conducente_id INTEGER REFERENCES users(id),
+        stato VARCHAR(30) DEFAULT 'in_attesa' 
+          CHECK (stato IN ('in_attesa', 'accettata', 'in_corso', 'completata', 'annullata')),
+        partenza_indirizzo TEXT NOT NULL,
+        partenza_lat DECIMAL(10, 8) NOT NULL,
+        partenza_lng DECIMAL(11, 8) NOT NULL,
+        destinazione_indirizzo TEXT NOT NULL,
+        destinazione_lat DECIMAL(10, 8) NOT NULL,
+        destinazione_lng DECIMAL(11, 8) NOT NULL,
+        distanza_km DECIMAL(8, 2),
+        rimborso_calcolato DECIMAL(8, 2),
+        rimborso_finale DECIMAL(8, 2),
+        stripe_payment_intent VARCHAR(255),
+        valutazione_passeggero INTEGER CHECK (valutazione_passeggero BETWEEN 1 AND 5),
+        valutazione_conducente INTEGER CHECK (valutazione_conducente BETWEEN 1 AND 5),
+        iniziata_il TIMESTAMP,
+        completata_il TIMESTAMP,
+        creata_il TIMESTAMP DEFAULT NOW()
+      );
+
+      -- TABELLA PAGAMENTI
+      CREATE TABLE IF NOT EXISTS pagamenti (
+        id SERIAL PRIMARY KEY,
+        corsa_id INTEGER REFERENCES corse(id),
+        passeggero_id INTEGER REFERENCES users(id),
+        conducente_id INTEGER REFERENCES users(id),
+        importo DECIMAL(8, 2) NOT NULL,
+        stato VARCHAR(30) DEFAULT 'pending'
+          CHECK (stato IN ('pending', 'completato', 'fallito', 'rimborsato')),
+        stripe_payment_id VARCHAR(255),
+        stripe_transfer_id VARCHAR(255),
+        creato_il TIMESTAMP DEFAULT NOW()
+      );
+
+      -- TABELLA NOTIFICHE
+      CREATE TABLE IF NOT EXISTS notifiche (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        titolo VARCHAR(255) NOT NULL,
+        messaggio TEXT NOT NULL,
+        letta BOOLEAN DEFAULT false,
+        creata_il TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ Database inizializzato correttamente');
+  } catch (err) {
+    console.error('❌ Errore inizializzazione database:', err);
+  } finally {
+    client.release();
+  }
+};
+
+module.exports = { pool, initDatabase };

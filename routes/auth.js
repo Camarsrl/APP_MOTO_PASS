@@ -59,16 +59,23 @@ router.post('/registra/passeggero', async (req, res) => {
 // REGISTRAZIONE CONDUCENTE
 // ================================
 router.post('/registra/conducente', async (req, res) => {
-  const { 
+  const {
     nome, cognome, email, password, telefono,
-    numero_patente, tipo_patente, targa_moto, 
-    marca_moto, modello_moto, iban 
+    numero_patente, tipo_patente, targa_moto,
+    marca_moto, modello_moto, iban, tipo_servizio
   } = req.body;
 
   if (!nome || !cognome || !email || !password || !telefono ||
       !numero_patente || !tipo_patente || !targa_moto || !iban) {
     return res.status(400).json({ errore: 'Tutti i campi sono obbligatori' });
   }
+
+  // Il tipo di servizio è opzionale: se non specificato (o non valido) il
+  // conducente viene registrato per entrambi i servizi.
+  const tipiServizioValidi = ['passeggeri', 'pacchi', 'entrambi'];
+  const tipoServizioFinale = tipiServizioValidi.includes(tipo_servizio)
+    ? tipo_servizio
+    : 'entrambi';
 
   const client = await pool.connect();
   try {
@@ -95,11 +102,11 @@ router.post('/registra/conducente', async (req, res) => {
 
     // Crea profilo conducente
     await client.query(
-      `INSERT INTO conducenti 
-       (user_id, numero_patente, tipo_patente, targa_moto, marca_moto, modello_moto, iban)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [utente.rows[0].id, numero_patente, tipo_patente, 
-       targa_moto, marca_moto, modello_moto, iban]
+      `INSERT INTO conducenti
+       (user_id, numero_patente, tipo_patente, targa_moto, marca_moto, modello_moto, iban, tipo_servizio)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [utente.rows[0].id, numero_patente, tipo_patente,
+       targa_moto, marca_moto, modello_moto, iban, tipoServizioFinale]
     );
 
     await client.query('COMMIT');
@@ -114,7 +121,7 @@ router.post('/registra/conducente', async (req, res) => {
     res.status(201).json({
       messaggio: 'Registrazione conducente completata! In attesa di verifica.',
       token,
-      utente: utente.rows[0]
+      utente: { ...utente.rows[0], tipo_servizio: tipoServizioFinale }
     });
 
   } catch (err) {
@@ -187,7 +194,7 @@ router.get('/profilo', require('../middleware/auth').verificaToken, async (req, 
     const risultato = await pool.query(
       `SELECT u.id, u.nome, u.cognome, u.email, u.telefono, u.ruolo, u.foto_profilo,
               c.numero_patente, c.targa_moto, c.marca_moto, c.modello_moto,
-              c.disponibile, c.valutazione_media, c.totale_corse, c.verificato
+              c.tipo_servizio, c.disponibile, c.valutazione_media, c.totale_corse, c.verificato
        FROM users u
        LEFT JOIN conducenti c ON u.id = c.user_id
        WHERE u.id = $1`,

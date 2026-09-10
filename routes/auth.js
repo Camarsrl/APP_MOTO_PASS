@@ -198,10 +198,17 @@ router.post('/login', async (req, res) => {
 // ================================
 router.get('/profilo', require('../middleware/auth').verificaToken, async (req, res) => {
   try {
+    // Se una sospensione precedente è scaduta, la puliamo prima di
+    // restituire il profilo, così l'app mostra sempre lo stato reale.
+    if (req.utente.ruolo === 'conducente') {
+      await require('../utils/recensioni').conducenteSospeso(req.utente.id);
+    }
+
     const risultato = await pool.query(
       `SELECT u.id, u.nome, u.cognome, u.email, u.telefono, u.ruolo, u.foto_profilo,
               c.numero_patente, c.targa_moto, c.marca_moto, c.modello_moto,
-              c.tipo_servizio, c.cilindrata, c.disponibile, c.valutazione_media, c.totale_corse, c.verificato
+              c.tipo_servizio, c.cilindrata, c.disponibile, c.valutazione_media, c.totale_corse, c.verificato,
+              c.pallini_rossi, c.sospeso_fino
        FROM users u
        LEFT JOIN conducenti c ON u.id = c.user_id
        WHERE u.id = $1`,

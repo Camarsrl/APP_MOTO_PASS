@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../database');
 const { verificaToken } = require('../middleware/auth');
+const { conducenteSospeso, registraVotoConducente } = require('../utils/recensioni');
 
 // ================================
 // LIMITI E TARIFFE CONSEGNA PACCHI
@@ -120,6 +121,14 @@ router.put('/:id/accetta', verificaToken, async (req, res) => {
     return res.status(403).json({ errore: 'Solo i conducenti possono accettare consegne' });
   }
 
+  const { sospeso, sospesoFino } = await conducenteSospeso(req.utente.id);
+  if (sospeso) {
+    const data = new Date(sospesoFino).toLocaleDateString('it-IT');
+    return res.status(403).json({
+      errore: `Il tuo account conducente è sospeso fino al ${data} per troppe recensioni negative`
+    });
+  }
+
   try {
     const risultato = await pool.query(
       `UPDATE consegne
@@ -192,6 +201,51 @@ router.put('/:id/consegnata', verificaToken, async (req, res) => {
       messaggio: 'Consegna completata! ✅',
       consegna: risultato.rows[0]
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// RECENSISCI IL CONDUCENTE (mittente, dopo una consegna completata)
+// ================================
+router.post('/:id/recensisci', verificaToken, async (req, res) => {
+  const voto = parseInt(req.body.voto, 10);
+  if (isNaN(voto) || voto < 1 || voto > 5) {
+    return res.status(400).json({ errore: 'Il voto deve essere un numero da 1 a 5' });
+  }
+
+  try {
+    const consegna = await pool.query(
+      `SELECT * FROM consegne WHERE id = $1 AND mittente_id = $2`,
+      [req.params.id, req.utente.id]
+    );
+
+    if (consegna.rows.length === 0) {
+      return res.status(404).json({ errore: 'Consegna non trovata' });
+    }
+
+    const c = consegna.rows[0];
+
+    if (c.stato !== 'consegnata') {
+      return res.status(400).json({ errore: 'Puoi recensire solo una consegna completata' });
+    }
+    if (!c.conducente_id) {
+      return res.status(400).json({ errore: 'Questa consegna non ha un conducente associato' });
+    }
+    if (c.valutazione_conducente !== null) {
+      return res.status(400).json({ errore: 'Hai già recensito questa consegna' });
+    }
+
+    await pool.query(
+      `UPDATE consegne SET valutazione_conducente = $1 WHERE id = $2`,
+      [voto, req.params.id]
+    );
+
+    await registraVotoConducente(c.conducente_id, voto);
+
+    res.json({ messaggio: 'Recensione registrata, grazie!' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });

@@ -28,6 +28,7 @@ app.use(express.urlencoded({ extended: true }));
 // ================================
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/corse', require('./routes/rides'));
+app.use('/api/consegne', require('./routes/consegne'));
 app.use('/api/pagamenti', require('./routes/payments'));
 
 // Route di test
@@ -89,7 +90,7 @@ const PORT = process.env.PORT || 3000;
 const avvia = async () => {
   // Inizializza il database
   await initDatabase();
-  
+
   server.listen(PORT, () => {
     console.log(`\n🛵 ================================`);
     console.log(`   MOTO PASS BACKEND ATTIVO!`);

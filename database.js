@@ -47,7 +47,9 @@ const initDatabase = async () => {
         latitudine DECIMAL(10, 8),
         longitudine DECIMAL(11, 8),
         valutazione_media DECIMAL(3,2) DEFAULT 5.00,
-        totale_corse INTEGER DEFAULT 0
+        totale_corse INTEGER DEFAULT 0,
+        pallini_rossi INTEGER NOT NULL DEFAULT 0,
+        sospeso_fino TIMESTAMP
       );
 
       -- TABELLA CORSE
@@ -98,6 +100,7 @@ const initDatabase = async () => {
         note TEXT,
         rimborso_calcolato DECIMAL(8, 2),
         rimborso_finale DECIMAL(8, 2),
+        valutazione_conducente INTEGER CHECK (valutazione_conducente BETWEEN 1 AND 5),
         creata_il TIMESTAMP DEFAULT NOW(),
         accettata_il TIMESTAMP,
         ritirata_il TIMESTAMP,
@@ -149,6 +152,18 @@ const initDatabase = async () => {
       -- Preferenza di cilindrata del passeggero in fase di richiesta corsa.
       ALTER TABLE corse
         ADD COLUMN IF NOT EXISTS cilindrata_preferita VARCHAR(20);
+
+      -- Sistema recensioni e sospensione conducenti: pallini rossi per
+      -- recensioni negative (1-2 stelle) e data fine sospensione temporanea.
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS pallini_rossi INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS sospeso_fino TIMESTAMP;
+
+      -- Anche le consegne pacchi possono essere valutate dal mittente.
+      ALTER TABLE consegne
+        ADD COLUMN IF NOT EXISTS valutazione_conducente INTEGER
+          CHECK (valutazione_conducente BETWEEN 1 AND 5);
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

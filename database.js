@@ -38,6 +38,8 @@ const initDatabase = async () => {
         foto_patente VARCHAR(500),
         foto_documento VARCHAR(500),
         iban VARCHAR(50),
+        tipo_servizio VARCHAR(20) NOT NULL DEFAULT 'entrambi'
+          CHECK (tipo_servizio IN ('passeggeri', 'pacchi', 'entrambi')),
         verificato BOOLEAN DEFAULT false,
         disponibile BOOLEAN DEFAULT false,
         latitudine DECIMAL(10, 8),
@@ -51,7 +53,7 @@ const initDatabase = async () => {
         id SERIAL PRIMARY KEY,
         passeggero_id INTEGER REFERENCES users(id),
         conducente_id INTEGER REFERENCES users(id),
-        stato VARCHAR(30) DEFAULT 'in_attesa' 
+        stato VARCHAR(30) DEFAULT 'in_attesa'
           CHECK (stato IN ('in_attesa', 'accettata', 'in_corso', 'completata', 'annullata')),
         partenza_indirizzo TEXT NOT NULL,
         partenza_lat DECIMAL(10, 8) NOT NULL,
@@ -68,6 +70,34 @@ const initDatabase = async () => {
         iniziata_il TIMESTAMP,
         completata_il TIMESTAMP,
         creata_il TIMESTAMP DEFAULT NOW()
+      );
+
+      -- TABELLA CONSEGNE (piccoli oggetti/pacchi)
+      CREATE TABLE IF NOT EXISTS consegne (
+        id SERIAL PRIMARY KEY,
+        mittente_id INTEGER REFERENCES users(id),
+        conducente_id INTEGER REFERENCES users(id),
+        stato VARCHAR(30) DEFAULT 'richiesta'
+          CHECK (stato IN ('richiesta', 'accettata', 'ritirata', 'consegnata', 'annullata')),
+        ritiro_indirizzo TEXT NOT NULL,
+        ritiro_lat DECIMAL(10, 8),
+        ritiro_lng DECIMAL(11, 8),
+        consegna_indirizzo TEXT NOT NULL,
+        consegna_lat DECIMAL(10, 8),
+        consegna_lng DECIMAL(11, 8),
+        descrizione_oggetto TEXT NOT NULL,
+        peso_kg DECIMAL(5, 2) NOT NULL,
+        dimensione_cm DECIMAL(5, 1) NOT NULL,
+        distanza_km DECIMAL(8, 2),
+        destinatario_nome VARCHAR(200) NOT NULL,
+        destinatario_telefono VARCHAR(20) NOT NULL,
+        note TEXT,
+        rimborso_calcolato DECIMAL(8, 2),
+        rimborso_finale DECIMAL(8, 2),
+        creata_il TIMESTAMP DEFAULT NOW(),
+        accettata_il TIMESTAMP,
+        ritirata_il TIMESTAMP,
+        consegnata_il TIMESTAMP
       );
 
       -- TABELLA PAGAMENTI
@@ -93,6 +123,11 @@ const initDatabase = async () => {
         letta BOOLEAN DEFAULT false,
         creata_il TIMESTAMP DEFAULT NOW()
       );
+
+      -- Se la tabella "conducenti" esisteva già da prima (creata senza
+      -- tipo_servizio), aggiungiamo la colonna senza toccare i dati esistenti.
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS tipo_servizio VARCHAR(20) NOT NULL DEFAULT 'entrambi';
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

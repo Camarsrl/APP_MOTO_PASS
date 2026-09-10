@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../database');
 const { verificaToken } = require('../middleware/auth');
+const { conducenteSospeso, registraVotoConducente } = require('../utils/recensioni');
 
 // Costo rimborso per km (benzina + spese)
 const COSTO_PER_KM = 0.25; // €0.25 per km
@@ -35,6 +36,7 @@ router.get('/conducenti-vicini', verificaToken, async (req, res) => {
          AND c.verificato = true
          AND u.attivo = true
          AND c.latitudine IS NOT NULL
+         AND (c.sospeso_fino IS NULL OR c.sospeso_fino <= NOW())
          AND ($4::VARCHAR IS NULL OR c.cilindrata = $4)
        HAVING (6371 * acos(
          cos(radians($1)) * cos(radians(c.latitudine)) *
@@ -150,6 +152,14 @@ router.put('/:id/accetta', verificaToken, async (req, res) => {
     return res.status(403).json({ errore: 'Solo i conducenti possono accettare corse' });
   }
 
+  const { sospeso, sospesoFino } = await conducenteSospeso(req.utente.id);
+  if (sospeso) {
+    const data = new Date(sospesoFino).toLocaleDateString('it-IT');
+    return res.status(403).json({
+      errore: `Il tuo account conducente è sospeso fino al ${data} per troppe recensioni negative`
+    });
+  }
+
   try {
     const risultato = await pool.query(
       `UPDATE corse
@@ -222,6 +232,55 @@ router.put('/:id/completa', verificaToken, async (req, res) => {
       messaggio: 'Corsa completata! Il rimborso sarà accreditato a breve.',
       corsa: risultato.rows[0]
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// RECENSISCI IL CONDUCENTE (passeggero, dopo una corsa completata)
+// ================================
+router.post('/:id/recensisci', verificaToken, async (req, res) => {
+  if (req.utente.ruolo !== 'passeggero') {
+    return res.status(403).json({ errore: 'Solo il passeggero può recensire il conducente' });
+  }
+
+  const voto = parseInt(req.body.voto, 10);
+  if (isNaN(voto) || voto < 1 || voto > 5) {
+    return res.status(400).json({ errore: 'Il voto deve essere un numero da 1 a 5' });
+  }
+
+  try {
+    const corsa = await pool.query(
+      `SELECT * FROM corse WHERE id = $1 AND passeggero_id = $2`,
+      [req.params.id, req.utente.id]
+    );
+
+    if (corsa.rows.length === 0) {
+      return res.status(404).json({ errore: 'Corsa non trovata' });
+    }
+
+    const c = corsa.rows[0];
+
+    if (c.stato !== 'completata') {
+      return res.status(400).json({ errore: 'Puoi recensire solo una corsa completata' });
+    }
+    if (!c.conducente_id) {
+      return res.status(400).json({ errore: 'Questa corsa non ha un conducente associato' });
+    }
+    if (c.valutazione_conducente !== null) {
+      return res.status(400).json({ errore: 'Hai già recensito questa corsa' });
+    }
+
+    await pool.query(
+      `UPDATE corse SET valutazione_conducente = $1 WHERE id = $2`,
+      [voto, req.params.id]
+    );
+
+    await registraVotoConducente(c.conducente_id, voto);
+
+    res.json({ messaggio: 'Recensione registrata, grazie!' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });

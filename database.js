@@ -35,6 +35,8 @@ const initDatabase = async () => {
         targa_moto VARCHAR(20) NOT NULL,
         marca_moto VARCHAR(100),
         modello_moto VARCHAR(100),
+        cilindrata VARCHAR(20) NOT NULL DEFAULT '51_125'
+          CHECK (cilindrata IN ('fino_50', '51_125', '126_300', 'oltre_300')),
         foto_patente VARCHAR(500),
         foto_documento VARCHAR(500),
         iban VARCHAR(50),
@@ -56,12 +58,14 @@ const initDatabase = async () => {
         stato VARCHAR(30) DEFAULT 'in_attesa'
           CHECK (stato IN ('in_attesa', 'accettata', 'in_corso', 'completata', 'annullata')),
         partenza_indirizzo TEXT NOT NULL,
-        partenza_lat DECIMAL(10, 8) NOT NULL,
-        partenza_lng DECIMAL(11, 8) NOT NULL,
+        partenza_lat DECIMAL(10, 8),
+        partenza_lng DECIMAL(11, 8),
         destinazione_indirizzo TEXT NOT NULL,
-        destinazione_lat DECIMAL(10, 8) NOT NULL,
-        destinazione_lng DECIMAL(11, 8) NOT NULL,
+        destinazione_lat DECIMAL(10, 8),
+        destinazione_lng DECIMAL(11, 8),
         distanza_km DECIMAL(8, 2),
+        cilindrata_preferita VARCHAR(20)
+          CHECK (cilindrata_preferita IS NULL OR cilindrata_preferita IN ('fino_50', '51_125', '126_300', 'oltre_300')),
         rimborso_calcolato DECIMAL(8, 2),
         rimborso_finale DECIMAL(8, 2),
         stripe_payment_intent VARCHAR(255),
@@ -128,6 +132,23 @@ const initDatabase = async () => {
       -- tipo_servizio), aggiungiamo la colonna senza toccare i dati esistenti.
       ALTER TABLE conducenti
         ADD COLUMN IF NOT EXISTS tipo_servizio VARCHAR(20) NOT NULL DEFAULT 'entrambi';
+
+      -- Idem per la cilindrata dello scooter del conducente.
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS cilindrata VARCHAR(20) NOT NULL DEFAULT '51_125';
+
+      -- La tabella "corse" esisteva già con partenza/destinazione lat-lng
+      -- obbligatorie: l'app non ha ancora una mappa, quindi i passeggeri
+      -- inseriscono solo l'indirizzo testuale. Rendiamo le coordinate
+      -- opzionali senza perdere i dati già presenti.
+      ALTER TABLE corse ALTER COLUMN partenza_lat DROP NOT NULL;
+      ALTER TABLE corse ALTER COLUMN partenza_lng DROP NOT NULL;
+      ALTER TABLE corse ALTER COLUMN destinazione_lat DROP NOT NULL;
+      ALTER TABLE corse ALTER COLUMN destinazione_lng DROP NOT NULL;
+
+      -- Preferenza di cilindrata del passeggero in fase di richiesta corsa.
+      ALTER TABLE corse
+        ADD COLUMN IF NOT EXISTS cilindrata_preferita VARCHAR(20);
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

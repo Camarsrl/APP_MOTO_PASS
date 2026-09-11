@@ -194,6 +194,36 @@ router.post('/login', async (req, res) => {
 });
 
 // ================================
+// AGGIORNA TIPO DI SERVIZIO (conducente)
+// ================================
+// A differenza della cilindrata/targa, il tipo di servizio può cambiare in
+// qualunque momento dalla home: il conducente decide se vuole ricevere
+// passaggi persone, piccole consegne, o entrambi.
+router.put('/tipo-servizio', require('../middleware/auth').verificaToken, async (req, res) => {
+  if (req.utente.ruolo !== 'conducente') {
+    return res.status(403).json({ errore: 'Solo i conducenti possono impostare il tipo di servizio' });
+  }
+
+  const tipiServizioValidi = ['passeggeri', 'pacchi', 'entrambi'];
+  const { tipo_servizio } = req.body;
+
+  if (!tipiServizioValidi.includes(tipo_servizio)) {
+    return res.status(400).json({ errore: 'Tipo di servizio non valido' });
+  }
+
+  try {
+    await pool.query(
+      `UPDATE conducenti SET tipo_servizio = $1 WHERE user_id = $2`,
+      [tipo_servizio, req.utente.id]
+    );
+    res.json({ messaggio: 'Tipo di servizio aggiornato', tipo_servizio });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
 // PROFILO UTENTE
 // ================================
 router.get('/profilo', require('../middleware/auth').verificaToken, async (req, res) => {

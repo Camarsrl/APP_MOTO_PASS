@@ -95,6 +95,8 @@ const initDatabase = async () => {
         consegna_lat DECIMAL(10, 8),
         consegna_lng DECIMAL(11, 8),
         descrizione_oggetto TEXT NOT NULL,
+        categoria VARCHAR(20) NOT NULL DEFAULT 'altro'
+          CHECK (categoria IN ('fiori', 'documenti', 'piccolo_pacco', 'altro')),
         peso_kg DECIMAL(5, 2) NOT NULL,
         dimensione_cm DECIMAL(5, 1) NOT NULL,
         distanza_km DECIMAL(8, 2),
@@ -179,6 +181,13 @@ const initDatabase = async () => {
         ADD COLUMN IF NOT EXISTS conducente_arrivato_il TIMESTAMP;
       ALTER TABLE corse
         ADD COLUMN IF NOT EXISTS casco_consegnato_il TIMESTAMP;
+
+      -- Le consegne diventano un servizio a sé, distinto dai passaggi
+      -- persone: il mittente sceglie una categoria semplice (fiori,
+      -- documenti, piccolo pacco, altro) per far capire subito al
+      -- conducente cosa gli viene chiesto di trasportare.
+      ALTER TABLE consegne
+        ADD COLUMN IF NOT EXISTS categoria VARCHAR(20) NOT NULL DEFAULT 'altro';
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

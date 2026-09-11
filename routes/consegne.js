@@ -14,18 +14,24 @@ const DIMENSIONE_MASSIMA_CM = 40; // lato più lungo del pacco, in cm
 const SUPPLEMENTO_FISSO = 1.0;    // € fissi per ogni consegna
 const COSTO_PER_KM = 0.2;         // € per km, oltre al supplemento fisso
 
+// Categorie semplici che aiutano il conducente a capire a colpo d'occhio
+// cosa gli viene chiesto di trasportare.
+const CATEGORIE_VALIDE = ['fiori', 'documenti', 'piccolo_pacco', 'altro'];
+
 // ================================
 // RICHIEDI UNA CONSEGNA (mittente)
 // ================================
-// Qualunque utente registrato (passeggero o conducente) può spedire un
-// pacco: non è richiesto un ruolo specifico.
+// Qualunque utente registrato (passeggero o conducente) può inviare un
+// piccolo pacco o dei fiori: non è richiesto un ruolo specifico.
 router.post('/richiedi', verificaToken, async (req, res) => {
   const {
     ritiro_indirizzo, ritiro_lat, ritiro_lng,
     consegna_indirizzo, consegna_lat, consegna_lng,
-    descrizione_oggetto, peso_kg, dimensione_cm,
+    descrizione_oggetto, categoria, peso_kg, dimensione_cm,
     distanza_km, destinatario_nome, destinatario_telefono, note
   } = req.body;
+
+  const categoriaFinale = CATEGORIE_VALIDE.includes(categoria) ? categoria : 'altro';
 
   if (!ritiro_indirizzo || !consegna_indirizzo || !descrizione_oggetto ||
       peso_kg === undefined || dimensione_cm === undefined ||
@@ -63,16 +69,16 @@ router.post('/richiedi', verificaToken, async (req, res) => {
         mittente_id, stato,
         ritiro_indirizzo, ritiro_lat, ritiro_lng,
         consegna_indirizzo, consegna_lat, consegna_lng,
-        descrizione_oggetto, peso_kg, dimensione_cm, distanza_km,
+        descrizione_oggetto, categoria, peso_kg, dimensione_cm, distanza_km,
         destinatario_nome, destinatario_telefono, note,
         rimborso_calcolato
-      ) VALUES ($1, 'richiesta', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+      ) VALUES ($1, 'richiesta', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       RETURNING *`,
       [
         req.utente.id,
         ritiro_indirizzo, ritiro_lat || null, ritiro_lng || null,
         consegna_indirizzo, consegna_lat || null, consegna_lng || null,
-        descrizione_oggetto, peso, dimensione, distanza,
+        descrizione_oggetto, categoriaFinale, peso, dimensione, distanza,
         destinatario_nome, destinatario_telefono, note || null,
         rimborso
       ]

@@ -5,7 +5,7 @@ const { verificaToken } = require('../middleware/auth');
 const { conducenteSospeso, registraVotoConducente } = require('../utils/recensioni');
 
 // Costo rimborso per km (benzina + spese)
-const COSTO_PER_KM = 0.25; // €0.25 per km
+const COSTO_PER_KM = 0.80; // €0.80 per km
 
 // Fasce di cilindrata valide (le stesse usate in registrazione conducente)
 const CILINDRATE_VALIDE = ['fino_50', '51_125', '126_300', 'oltre_300'];

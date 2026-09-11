@@ -73,6 +73,9 @@ const initDatabase = async () => {
         stripe_payment_intent VARCHAR(255),
         valutazione_passeggero INTEGER CHECK (valutazione_passeggero BETWEEN 1 AND 5),
         valutazione_conducente INTEGER CHECK (valutazione_conducente BETWEEN 1 AND 5),
+        accettata_il TIMESTAMP,
+        conducente_arrivato_il TIMESTAMP,
+        casco_consegnato_il TIMESTAMP,
         iniziata_il TIMESTAMP,
         completata_il TIMESTAMP,
         creata_il TIMESTAMP DEFAULT NOW()
@@ -164,6 +167,18 @@ const initDatabase = async () => {
       ALTER TABLE consegne
         ADD COLUMN IF NOT EXISTS valutazione_conducente INTEGER
           CHECK (valutazione_conducente BETWEEN 1 AND 5);
+
+      -- Ciclo vita completo del passaggio: senza mappa/GPS il passeggero non
+      -- indica più una distanza stimata. Il rimborso viene calcolato a fine
+      -- corsa sui km realmente percorsi (dichiarati dal conducente), e il
+      -- viaggio passa per tappe intermedie utili anche per la sicurezza
+      -- (arrivo del conducente, consegna del casco) prima di poter partire.
+      ALTER TABLE corse
+        ADD COLUMN IF NOT EXISTS accettata_il TIMESTAMP;
+      ALTER TABLE corse
+        ADD COLUMN IF NOT EXISTS conducente_arrivato_il TIMESTAMP;
+      ALTER TABLE corse
+        ADD COLUMN IF NOT EXISTS casco_consegnato_il TIMESTAMP;
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

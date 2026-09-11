@@ -4,8 +4,14 @@ const { pool } = require('../database');
 const { verificaToken } = require('../middleware/auth');
 const { conducenteSospeso, registraVotoConducente } = require('../utils/recensioni');
 
-// Costo rimborso per km (benzina + spese)
-const COSTO_PER_KM = 0.80; // €0.80 per km
+// Tariffa pagata dal passeggero: €1 al km, con una spesa minima di €4
+// a corsa (anche per tragitti brevissimi).
+const TARIFFA_PASSEGGERO_PER_KM = 1.0; // €1,00 per km
+const MINIMO_PASSEGGERO = 4.0;         // € minimo per corsa
+
+// L'app trattiene il 30% di quanto paga realmente il passeggero (minimo
+// incluso); il conducente riceve il restante 70%.
+const COMMISSIONE_APP = 0.30; // 30%
 
 // Fasce di cilindrata valide (le stesse usate in registrazione conducente)
 const CILINDRATE_VALIDE = ['fino_50', '51_125', '126_300', 'oltre_300'];
@@ -347,7 +353,13 @@ router.put('/:id/completa', verificaToken, async (req, res) => {
     return res.status(400).json({ errore: 'Indica i km realmente percorsi (numero maggiore di zero)' });
   }
 
-  const rimborsoCalcolato = Math.round(kmPercorsi * COSTO_PER_KM * 100) / 100;
+  // Il passeggero paga €1/km con un minimo di €4 a corsa; il conducente
+  // riceve il 70% di quanto viene realmente pagato (minimo incluso),
+  // il restante 30% resta all'app.
+  const prezzoPasseggero = Math.max(kmPercorsi * TARIFFA_PASSEGGERO_PER_KM, MINIMO_PASSEGGERO);
+  const rimborsoCalcolato = Math.round(prezzoPasseggero * 100) / 100;
+  const rimborsoConducente = Math.round((rimborsoCalcolato * (1 - COMMISSIONE_APP)) * 100) / 100;
+  const commissioneApp = Math.round((rimborsoCalcolato - rimborsoConducente) * 100) / 100;
 
   try {
     const risultato = await pool.query(
@@ -355,10 +367,12 @@ router.put('/:id/completa', verificaToken, async (req, res) => {
        SET stato = 'completata', completata_il = NOW(),
            distanza_km = $3,
            rimborso_calcolato = $4,
-           rimborso_finale = $4
+           rimborso_finale = $4,
+           rimborso_conducente = $5,
+           commissione_app = $6
        WHERE id = $1 AND conducente_id = $2 AND stato = 'in_corso'
        RETURNING *`,
-      [req.params.id, req.utente.id, kmPercorsi, rimborsoCalcolato]
+      [req.params.id, req.utente.id, kmPercorsi, rimborsoCalcolato, rimborsoConducente, commissioneApp]
     );
 
     if (risultato.rows.length === 0) {

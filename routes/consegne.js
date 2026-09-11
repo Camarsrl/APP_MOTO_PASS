@@ -1,8 +1,32 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
+const path = require('path');
 const { pool } = require('../database');
 const { verificaToken } = require('../middleware/auth');
 const { conducenteSospeso, registraVotoConducente } = require('../utils/recensioni');
+
+// Foto opzionale dell'oggetto da consegnare: scritta dove server.js indica
+// (app.set('uploadDir', ...)), che su Render punta al Persistent Disk in
+// produzione. Limite 5 MB, solo immagini.
+const uploadFoto = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, path.join(req.app.get('uploadDir'), 'consegne'));
+    },
+    filename: (req, file, cb) => {
+      const estensione = path.extname(file.originalname) || '.jpg';
+      cb(null, `consegna_${req.params.id}_${Date.now()}${estensione}`);
+    }
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) {
+      return cb(new Error('Puoi caricare solo immagini'));
+    }
+    cb(null, true);
+  }
+});
 
 // ================================
 // LIMITI E TARIFFE CONSEGNA PACCHI
@@ -92,6 +116,47 @@ router.post('/richiedi', verificaToken, async (req, res) => {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });
   }
+});
+
+// ================================
+// CARICA FOTO DELLA CONSEGNA (mittente, opzionale)
+// ================================
+router.post('/:id/foto', verificaToken, async (req, res) => {
+  // Verifichiamo che la consegna esista e sia del mittente PRIMA di
+  // scrivere qualunque file su disco.
+  try {
+    const consegna = await pool.query(
+      `SELECT id FROM consegne WHERE id = $1 AND mittente_id = $2`,
+      [req.params.id, req.utente.id]
+    );
+    if (consegna.rows.length === 0) {
+      return res.status(404).json({ errore: 'Consegna non trovata' });
+    }
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ errore: 'Errore del server' });
+  }
+
+  uploadFoto.single('foto')(req, res, async (err) => {
+    if (err) {
+      return res.status(400).json({ errore: err.message || 'Errore nel caricamento della foto' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ errore: 'Nessuna foto ricevuta' });
+    }
+
+    try {
+      const fotoUrl = `/uploads/consegne/${req.file.filename}`;
+      const risultato = await pool.query(
+        `UPDATE consegne SET foto_url = $1 WHERE id = $2 RETURNING *`,
+        [fotoUrl, req.params.id]
+      );
+      res.json({ messaggio: 'Foto caricata', consegna: risultato.rows[0] });
+    } catch (dbErr) {
+      console.error(dbErr);
+      res.status(500).json({ errore: 'Errore del server' });
+    }
+  });
 });
 
 // ================================

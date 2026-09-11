@@ -61,9 +61,10 @@ router.get('/conducenti-vicini', verificaToken, async (req, res) => {
 // ================================
 // RICHIEDI UNA CORSA
 // ================================
-// L'app non ha ancora una mappa: partenza/destinazione sono indirizzi
-// testuali e la distanza è stimata manualmente dal passeggero (come per
-// le consegne pacchi), quindi lat/lng sono opzionali.
+// L'app non ha ancora una mappa: partenza/destinazione sono solo indirizzi
+// testuali, quindi lat/lng sono opzionali. Il passeggero NON indica più una
+// distanza stimata: il rimborso viene calcolato a fine corsa sui km
+// realmente percorsi, dichiarati dal conducente (vedi PUT /:id/completa).
 router.post('/richiedi', verificaToken, async (req, res) => {
   if (req.utente.ruolo !== 'passeggero') {
     return res.status(403).json({ errore: 'Solo i passeggeri possono richiedere corse' });
@@ -72,7 +73,7 @@ router.post('/richiedi', verificaToken, async (req, res) => {
   const {
     partenza_indirizzo, partenza_lat, partenza_lng,
     destinazione_indirizzo, destinazione_lat, destinazione_lng,
-    distanza_km, cilindrata_preferita
+    cilindrata_preferita
   } = req.body;
 
   if (!partenza_indirizzo || !destinazione_indirizzo) {
@@ -85,34 +86,60 @@ router.post('/richiedi', verificaToken, async (req, res) => {
     : null;
 
   try {
-    // Calcola rimborso solo se il passeggero ha indicato una distanza stimata
-    const distanza = distanza_km ? parseFloat(distanza_km) : null;
-    const rimborso = distanza ? (distanza * COSTO_PER_KM).toFixed(2) : null;
-
     const risultato = await pool.query(
       `INSERT INTO corse (
         passeggero_id, stato,
         partenza_indirizzo, partenza_lat, partenza_lng,
         destinazione_indirizzo, destinazione_lat, destinazione_lng,
-        distanza_km, cilindrata_preferita, rimborso_calcolato
-      ) VALUES ($1, 'in_attesa', $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        cilindrata_preferita
+      ) VALUES ($1, 'in_attesa', $2, $3, $4, $5, $6, $7, $8)
       RETURNING *`,
       [
         req.utente.id,
         partenza_indirizzo, partenza_lat || null, partenza_lng || null,
         destinazione_indirizzo, destinazione_lat || null, destinazione_lng || null,
-        distanza, cilindrataFinale, rimborso
+        cilindrataFinale
       ]
     );
 
-    const corsa = risultato.rows[0];
-
     res.status(201).json({
-      messaggio: 'Corsa richiesta! Cerco conducente...',
-      corsa,
-      rimborso_stimato: rimborso ? `€${rimborso}` : null
+      messaggio: 'Corsa richiesta! Cerco un conducente vicino a te...',
+      corsa: risultato.rows[0]
     });
 
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// DETTAGLIO DI UNA CORSA
+// ================================
+// Usato dall'app sia dal lato passeggero (per seguire lo stato in tempo
+// reale mentre aspetta/viaggia) sia dal lato conducente. Non essendoci
+// ancora notifiche push, l'app interroga questo endpoint periodicamente.
+router.get('/:id', verificaToken, async (req, res) => {
+  try {
+    const risultato = await pool.query(
+      `SELECT c.*,
+              p.nome AS nome_passeggero, p.cognome AS cognome_passeggero, p.foto_profilo AS foto_passeggero,
+              co.nome AS nome_conducente, co.cognome AS cognome_conducente, co.foto_profilo AS foto_conducente,
+              cd.targa_moto, cd.marca_moto, cd.modello_moto, cd.cilindrata,
+              cd.valutazione_media AS valutazione_conducente_media
+       FROM corse c
+       LEFT JOIN users p ON c.passeggero_id = p.id
+       LEFT JOIN users co ON c.conducente_id = co.id
+       LEFT JOIN conducenti cd ON c.conducente_id = cd.user_id
+       WHERE c.id = $1 AND (c.passeggero_id = $2 OR c.conducente_id = $2)`,
+      [req.params.id, req.utente.id]
+    );
+
+    if (risultato.rows.length === 0) {
+      return res.status(404).json({ errore: 'Corsa non trovata' });
+    }
+
+    res.json(risultato.rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });
@@ -163,7 +190,7 @@ router.put('/:id/accetta', verificaToken, async (req, res) => {
   try {
     const risultato = await pool.query(
       `UPDATE corse
-       SET stato = 'accettata', conducente_id = $1
+       SET stato = 'accettata', conducente_id = $1, accettata_il = NOW()
        WHERE id = $2 AND stato = 'in_attesa'
        RETURNING *`,
       [req.utente.id, req.params.id]
@@ -184,20 +211,118 @@ router.put('/:id/accetta', verificaToken, async (req, res) => {
 });
 
 // ================================
-// INIZIA CORSA (conducente)
+// ANNULLA CORSA (passeggero, solo finché è ancora in attesa di un conducente)
 // ================================
-router.put('/:id/inizia', verificaToken, async (req, res) => {
+router.put('/:id/annulla', verificaToken, async (req, res) => {
   try {
     const risultato = await pool.query(
       `UPDATE corse
-       SET stato = 'in_corso', iniziata_il = NOW()
+       SET stato = 'annullata'
+       WHERE id = $1 AND passeggero_id = $2 AND stato = 'in_attesa'
+       RETURNING *`,
+      [req.params.id, req.utente.id]
+    );
+
+    if (risultato.rows.length === 0) {
+      return res.status(404).json({
+        errore: 'Corsa non trovata, oppure un conducente l\'ha già accettata'
+      });
+    }
+
+    res.json({ messaggio: 'Richiesta annullata', corsa: risultato.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// CONDUCENTE ARRIVATO DAL PASSEGGERO
+// ================================
+router.put('/:id/arrivato', verificaToken, async (req, res) => {
+  if (req.utente.ruolo !== 'conducente') {
+    return res.status(403).json({ errore: 'Solo il conducente può segnalare l\'arrivo' });
+  }
+
+  try {
+    const risultato = await pool.query(
+      `UPDATE corse
+       SET conducente_arrivato_il = NOW()
        WHERE id = $1 AND conducente_id = $2 AND stato = 'accettata'
+             AND conducente_arrivato_il IS NULL
        RETURNING *`,
       [req.params.id, req.utente.id]
     );
 
     if (risultato.rows.length === 0) {
       return res.status(404).json({ errore: 'Corsa non trovata' });
+    }
+
+    res.json({
+      messaggio: 'Hai segnalato il tuo arrivo al passeggero',
+      corsa: risultato.rows[0]
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// CASCO CONSEGNATO (conducente, requisito di sicurezza prima di partire)
+// ================================
+router.put('/:id/casco-consegnato', verificaToken, async (req, res) => {
+  if (req.utente.ruolo !== 'conducente') {
+    return res.status(403).json({ errore: 'Solo il conducente può segnalare la consegna del casco' });
+  }
+
+  try {
+    const risultato = await pool.query(
+      `UPDATE corse
+       SET casco_consegnato_il = NOW()
+       WHERE id = $1 AND conducente_id = $2 AND stato = 'accettata'
+             AND conducente_arrivato_il IS NOT NULL
+             AND casco_consegnato_il IS NULL
+       RETURNING *`,
+      [req.params.id, req.utente.id]
+    );
+
+    if (risultato.rows.length === 0) {
+      return res.status(404).json({
+        errore: 'Corsa non trovata, oppure devi prima segnalare il tuo arrivo'
+      });
+    }
+
+    res.json({
+      messaggio: 'Casco/cuffia igienica consegnati: ora puoi iniziare il passaggio',
+      corsa: risultato.rows[0]
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// INIZIA CORSA (conducente)
+// ================================
+// Requisito di sicurezza: non si può partire prima di aver consegnato il
+// casco/cuffia igienica al passeggero.
+router.put('/:id/inizia', verificaToken, async (req, res) => {
+  try {
+    const risultato = await pool.query(
+      `UPDATE corse
+       SET stato = 'in_corso', iniziata_il = NOW()
+       WHERE id = $1 AND conducente_id = $2 AND stato = 'accettata'
+             AND casco_consegnato_il IS NOT NULL
+       RETURNING *`,
+      [req.params.id, req.utente.id]
+    );
+
+    if (risultato.rows.length === 0) {
+      return res.status(404).json({
+        errore: 'Corsa non trovata, oppure devi prima consegnare il casco al passeggero'
+      });
     }
 
     res.json({
@@ -213,15 +338,27 @@ router.put('/:id/inizia', verificaToken, async (req, res) => {
 // ================================
 // COMPLETA CORSA (conducente)
 // ================================
+// Senza mappa/GPS non conosciamo i km in anticipo: è il conducente a
+// dichiarare i km realmente percorsi a fine corsa, e solo a quel punto
+// viene calcolato il rimborso.
 router.put('/:id/completa', verificaToken, async (req, res) => {
+  const kmPercorsi = parseFloat(req.body.km_percorsi);
+  if (isNaN(kmPercorsi) || kmPercorsi <= 0) {
+    return res.status(400).json({ errore: 'Indica i km realmente percorsi (numero maggiore di zero)' });
+  }
+
+  const rimborsoCalcolato = Math.round(kmPercorsi * COSTO_PER_KM * 100) / 100;
+
   try {
     const risultato = await pool.query(
       `UPDATE corse
        SET stato = 'completata', completata_il = NOW(),
-           rimborso_finale = rimborso_calcolato
+           distanza_km = $3,
+           rimborso_calcolato = $4,
+           rimborso_finale = $4
        WHERE id = $1 AND conducente_id = $2 AND stato = 'in_corso'
        RETURNING *`,
-      [req.params.id, req.utente.id]
+      [req.params.id, req.utente.id, kmPercorsi, rimborsoCalcolato]
     );
 
     if (risultato.rows.length === 0) {
@@ -322,12 +459,18 @@ router.put('/posizione', verificaToken, async (req, res) => {
 
   const { latitudine, longitudine, disponibile } = req.body;
 
+  // latitudine/longitudine sono opzionali (l'app non ha ancora una mappa/GPS
+  // e per ora invia solo il flag di disponibilità): con COALESCE aggiorniamo
+  // solo i campi effettivamente inviati, senza cancellare dati precedenti
+  // né inviare "undefined" al database.
   try {
     await pool.query(
       `UPDATE conducenti
-       SET latitudine = $1, longitudine = $2, disponibile = $3
+       SET latitudine = COALESCE($1, latitudine),
+           longitudine = COALESCE($2, longitudine),
+           disponibile = COALESCE($3, disponibile)
        WHERE user_id = $4`,
-      [latitudine, longitudine, disponibile, req.utente.id]
+      [latitudine ?? null, longitudine ?? null, disponibile ?? null, req.utente.id]
     );
 
     res.json({ messaggio: 'Posizione aggiornata' });

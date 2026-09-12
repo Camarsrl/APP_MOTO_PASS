@@ -120,6 +120,61 @@ router.post('/richiedi', verificaToken, async (req, res) => {
 });
 
 // ================================
+// CORSE DISPONIBILI (per conducenti, senza bisogno di posizione GPS)
+// ================================
+// IMPORTANTE: questa route e /storico qui sotto devono restare PRIMA di
+// GET /:id. Express fa il match delle route nell'ordine in cui sono
+// definite, quindi se /:id fosse prima, una richiesta a /corse/disponibili
+// o /corse/storico verrebbe interpretata come /:id con id="disponibili" (o
+// "storico"), causando un errore del database (id non numerico).
+router.get('/disponibili', verificaToken, async (req, res) => {
+  if (req.utente.ruolo !== 'conducente') {
+    return res.status(403).json({ errore: 'Solo i conducenti possono vedere le corse disponibili' });
+  }
+
+  try {
+    const risultato = await pool.query(
+      `SELECT c.*, u.nome AS nome_passeggero, u.cognome AS cognome_passeggero
+       FROM corse c
+       JOIN users u ON c.passeggero_id = u.id
+       WHERE c.stato = 'in_attesa'
+       ORDER BY c.creata_il DESC
+       LIMIT 30`
+    );
+
+    res.json({ corse: risultato.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// STORICO CORSE UTENTE
+// ================================
+router.get('/storico', verificaToken, async (req, res) => {
+  try {
+    const risultato = await pool.query(
+      `SELECT c.*,
+              p.nome AS nome_passeggero, p.cognome AS cognome_passeggero, p.foto_profilo AS foto_passeggero,
+              co.nome AS nome_conducente, co.cognome AS cognome_conducente, co.foto_profilo AS foto_conducente
+       FROM corse c
+       LEFT JOIN users p ON c.passeggero_id = p.id
+       LEFT JOIN users co ON c.conducente_id = co.id
+       WHERE c.passeggero_id = $1 OR c.conducente_id = $1
+       ORDER BY c.creata_il DESC
+       LIMIT 20`,
+      [req.utente.id]
+    );
+
+    res.json({ corse: risultato.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
 // DETTAGLIO DI UNA CORSA
 // ================================
 // Usato dall'app sia dal lato passeggero (per seguire lo stato in tempo
@@ -146,31 +201,6 @@ router.get('/:id', verificaToken, async (req, res) => {
     }
 
     res.json(risultato.rows[0]);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ errore: 'Errore del server' });
-  }
-});
-
-// ================================
-// CORSE DISPONIBILI (per conducenti, senza bisogno di posizione GPS)
-// ================================
-router.get('/disponibili', verificaToken, async (req, res) => {
-  if (req.utente.ruolo !== 'conducente') {
-    return res.status(403).json({ errore: 'Solo i conducenti possono vedere le corse disponibili' });
-  }
-
-  try {
-    const risultato = await pool.query(
-      `SELECT c.*, u.nome AS nome_passeggero, u.cognome AS cognome_passeggero
-       FROM corse c
-       JOIN users u ON c.passeggero_id = u.id
-       WHERE c.stato = 'in_attesa'
-       ORDER BY c.creata_il DESC
-       LIMIT 30`
-    );
-
-    res.json({ corse: risultato.rows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });
@@ -432,31 +462,6 @@ router.post('/:id/recensisci', verificaToken, async (req, res) => {
     await registraVotoConducente(c.conducente_id, voto);
 
     res.json({ messaggio: 'Recensione registrata, grazie!' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ errore: 'Errore del server' });
-  }
-});
-
-// ================================
-// STORICO CORSE UTENTE
-// ================================
-router.get('/storico', verificaToken, async (req, res) => {
-  try {
-    const risultato = await pool.query(
-      `SELECT c.*,
-              p.nome AS nome_passeggero, p.cognome AS cognome_passeggero, p.foto_profilo AS foto_passeggero,
-              co.nome AS nome_conducente, co.cognome AS cognome_conducente, co.foto_profilo AS foto_conducente
-       FROM corse c
-       LEFT JOIN users p ON c.passeggero_id = p.id
-       LEFT JOIN users co ON c.conducente_id = co.id
-       WHERE c.passeggero_id = $1 OR c.conducente_id = $1
-       ORDER BY c.creata_il DESC
-       LIMIT 20`,
-      [req.utente.id]
-    );
-
-    res.json({ corse: risultato.rows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });

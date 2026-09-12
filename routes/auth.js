@@ -62,12 +62,23 @@ router.post('/registra/conducente', async (req, res) => {
   const {
     nome, cognome, email, password, telefono,
     numero_patente, tipo_patente, targa_moto,
-    marca_moto, modello_moto, iban, tipo_servizio, cilindrata
+    marca_moto, modello_moto, iban, tipo_servizio, cilindrata,
+    accetta_regole_ingaggio
   } = req.body;
 
   if (!nome || !cognome || !email || !password || !telefono ||
       !numero_patente || !tipo_patente || !targa_moto || !iban) {
     return res.status(400).json({ errore: 'Tutti i campi sono obbligatori' });
+  }
+
+  // La schermata "Prima di iniziare con Moto Pass" (requisiti + Regole
+  // d'ingaggio) deve essere accettata per intero prima di registrarsi come
+  // conducente: la richiediamo anche qui, non solo lato app, così non è
+  // possibile aggirarla chiamando direttamente l'API.
+  if (accetta_regole_ingaggio !== true) {
+    return res.status(400).json({
+      errore: 'Devi accettare la checklist "Prima di iniziare con Moto Pass" per registrarti come conducente'
+    });
   }
 
   // Il tipo di servizio è opzionale: se non specificato (o non valido) il
@@ -107,11 +118,13 @@ router.post('/registra/conducente', async (req, res) => {
       [nome, cognome, email, passwordHash, telefono]
     );
 
-    // Crea profilo conducente
+    // Crea profilo conducente. regole_ingaggio_accettate_il registra data e
+    // ora dell'accettazione della checklist come prova verificabile, non
+    // solo un controllo lato app.
     await client.query(
       `INSERT INTO conducenti
-       (user_id, numero_patente, tipo_patente, targa_moto, marca_moto, modello_moto, iban, tipo_servizio, cilindrata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+       (user_id, numero_patente, tipo_patente, targa_moto, marca_moto, modello_moto, iban, tipo_servizio, cilindrata, regole_ingaggio_accettate_il)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
       [utente.rows[0].id, numero_patente, tipo_patente,
        targa_moto, marca_moto, modello_moto, iban, tipoServizioFinale, cilindrataFinale]
     );
@@ -238,7 +251,7 @@ router.get('/profilo', require('../middleware/auth').verificaToken, async (req, 
       `SELECT u.id, u.nome, u.cognome, u.email, u.telefono, u.ruolo, u.foto_profilo,
               c.numero_patente, c.targa_moto, c.marca_moto, c.modello_moto,
               c.tipo_servizio, c.cilindrata, c.disponibile, c.valutazione_media, c.totale_corse, c.verificato,
-              c.pallini_rossi, c.sospeso_fino
+              c.pallini_rossi, c.sospeso_fino, c.regole_ingaggio_accettate_il
        FROM users u
        LEFT JOIN conducenti c ON u.id = c.user_id
        WHERE u.id = $1`,

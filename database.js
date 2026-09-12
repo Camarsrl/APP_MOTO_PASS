@@ -70,6 +70,8 @@ const initDatabase = async () => {
           CHECK (cilindrata_preferita IS NULL OR cilindrata_preferita IN ('fino_50', '51_125', '126_300', 'oltre_300')),
         rimborso_calcolato DECIMAL(8, 2),
         rimborso_finale DECIMAL(8, 2),
+        rimborso_conducente DECIMAL(8, 2),
+        commissione_app DECIMAL(8, 2),
         stripe_payment_intent VARCHAR(255),
         valutazione_passeggero INTEGER CHECK (valutazione_passeggero BETWEEN 1 AND 5),
         valutazione_conducente INTEGER CHECK (valutazione_conducente BETWEEN 1 AND 5),
@@ -106,6 +108,8 @@ const initDatabase = async () => {
         note TEXT,
         rimborso_calcolato DECIMAL(8, 2),
         rimborso_finale DECIMAL(8, 2),
+        rimborso_conducente DECIMAL(8, 2),
+        commissione_app DECIMAL(8, 2),
         valutazione_conducente INTEGER CHECK (valutazione_conducente BETWEEN 1 AND 5),
         creata_il TIMESTAMP DEFAULT NOW(),
         accettata_il TIMESTAMP,
@@ -195,6 +199,27 @@ const initDatabase = async () => {
       -- (servito da server.js tramite /uploads su un disco persistente).
       ALTER TABLE consegne
         ADD COLUMN IF NOT EXISTS foto_url VARCHAR(500);
+
+      -- Commissione dell'app: il conducente/consegnatario riceve sempre la
+      -- tariffa piena per km (rimborso_conducente), mentre chi richiede il
+      -- servizio paga un importo maggiorato del 30% (rimborso_calcolato).
+      -- commissione_app è la differenza tra i due, trattenuta dalla
+      -- piattaforma. Vale sia per i passaggi che per le consegne.
+      ALTER TABLE corse
+        ADD COLUMN IF NOT EXISTS rimborso_conducente DECIMAL(8, 2);
+      ALTER TABLE corse
+        ADD COLUMN IF NOT EXISTS commissione_app DECIMAL(8, 2);
+      ALTER TABLE consegne
+        ADD COLUMN IF NOT EXISTS rimborso_conducente DECIMAL(8, 2);
+      ALTER TABLE consegne
+        ADD COLUMN IF NOT EXISTS commissione_app DECIMAL(8, 2);
+
+      -- Data/ora in cui il conducente ha accettato la checklist "Prima di
+      -- iniziare con Moto Pass" (requisiti + Regole d'ingaggio), mostrata in
+      -- fase di registrazione. Serve come prova verificabile dell'accettazione,
+      -- non solo un controllo lato app.
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS regole_ingaggio_accettate_il TIMESTAMP;
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

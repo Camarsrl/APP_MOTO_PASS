@@ -35,8 +35,17 @@ const uploadFoto = multer({
 // non appena i responsabili confermano i limiti definitivi.
 const PESO_MASSIMO_KG = 5;        // peso massimo del pacco
 const DIMENSIONE_MASSIMA_CM = 40; // lato più lungo del pacco, in cm
-const SUPPLEMENTO_FISSO = 1.0;    // € fissi per ogni consegna
-const COSTO_PER_KM = 0.2;         // € per km, oltre al supplemento fisso
+const SUPPLEMENTO_FISSO = 1.0;    // € fissi per ogni consegna (netti per il conducente)
+const COSTO_PER_KM = 0.2;         // € per km, oltre al supplemento fisso (netti per il conducente)
+// Spesa minima per chi ordina una consegna, allineata alla stessa regola
+// già in vigore per i passaggi persone (routes/rides.js): evita rimborsi
+// simbolici (es. pochi centesimi) sulle consegne brevissime.
+const MINIMO_MITTENTE = 4.0; // € minimo pagato da chi ordina una consegna
+
+// L'app trattiene una commissione anche sulle consegne: il conducente
+// riceve sempre supplemento + km netti, il mittente paga un importo
+// maggiorato per coprire la commissione.
+const COMMISSIONE_APP = 0.30; // 30%
 
 // Categorie semplici che aiutano il conducente a capire a colpo d'occhio
 // cosa gli viene chiesto di trasportare.
@@ -84,9 +93,18 @@ router.post('/richiedi', verificaToken, async (req, res) => {
 
   try {
     const distanza = distanza_km ? parseFloat(distanza_km) : null;
-    const rimborso = distanza
-      ? (SUPPLEMENTO_FISSO + distanza * COSTO_PER_KM).toFixed(2)
-      : null;
+    let rimborsoConducente = null;
+    let rimborso = null; // quanto paga il mittente (include la commissione app)
+    let commissioneApp = null;
+    if (distanza) {
+      // Il mittente paga almeno MINIMO_MITTENTE (come per i passaggi): si
+      // applica il minimo PRIMA di ricavare la parte netta del conducente,
+      // così il 70/30 resta coerente anche sulle consegne brevissime.
+      const rimborsoGrezzo = (SUPPLEMENTO_FISSO + distanza * COSTO_PER_KM) / (1 - COMMISSIONE_APP);
+      rimborso = Math.round(Math.max(rimborsoGrezzo, MINIMO_MITTENTE) * 100) / 100;
+      rimborsoConducente = Math.round((rimborso * (1 - COMMISSIONE_APP)) * 100) / 100;
+      commissioneApp = Math.round((rimborso - rimborsoConducente) * 100) / 100;
+    }
 
     const risultato = await pool.query(
       `INSERT INTO consegne (
@@ -95,8 +113,8 @@ router.post('/richiedi', verificaToken, async (req, res) => {
         consegna_indirizzo, consegna_lat, consegna_lng,
         descrizione_oggetto, categoria, peso_kg, dimensione_cm, distanza_km,
         destinatario_nome, destinatario_telefono, note,
-        rimborso_calcolato
-      ) VALUES ($1, 'richiesta', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        rimborso_calcolato, rimborso_conducente, commissione_app
+      ) VALUES ($1, 'richiesta', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
       RETURNING *`,
       [
         req.utente.id,
@@ -104,7 +122,7 @@ router.post('/richiedi', verificaToken, async (req, res) => {
         consegna_indirizzo, consegna_lat || null, consegna_lng || null,
         descrizione_oggetto, categoriaFinale, peso, dimensione, distanza,
         destinatario_nome, destinatario_telefono, note || null,
-        rimborso
+        rimborso, rimborsoConducente, commissioneApp
       ]
     );
 

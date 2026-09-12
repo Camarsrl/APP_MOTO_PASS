@@ -273,6 +273,35 @@ router.put('/:id/annulla', verificaToken, async (req, res) => {
 });
 
 // ================================
+// ELIMINA CORSA ANNULLATA (passeggero, pulizia dello storico)
+// ================================
+// Una corsa può essere annullata solo mentre è ancora 'in_attesa' (vedi
+// sopra), quindi non ha mai avuto un conducente associato: eliminarla
+// riguarda solo il passeggero che l'ha richiesta e non tocca lo storico
+// di nessun altro utente.
+router.delete('/:id', verificaToken, async (req, res) => {
+  try {
+    const risultato = await pool.query(
+      `DELETE FROM corse
+       WHERE id = $1 AND passeggero_id = $2 AND stato = 'annullata'
+       RETURNING id`,
+      [req.params.id, req.utente.id]
+    );
+
+    if (risultato.rows.length === 0) {
+      return res.status(404).json({
+        errore: 'Corsa non trovata, oppure non è una richiesta annullata'
+      });
+    }
+
+    res.json({ messaggio: 'Corsa eliminata dallo storico' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
 // CONDUCENTE ARRIVATO DAL PASSEGGERO
 // ================================
 router.put('/:id/arrivato', verificaToken, async (req, res) => {

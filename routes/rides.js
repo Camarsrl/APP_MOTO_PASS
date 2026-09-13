@@ -187,7 +187,18 @@ router.get('/:id', verificaToken, async (req, res) => {
               p.nome AS nome_passeggero, p.cognome AS cognome_passeggero, p.foto_profilo AS foto_passeggero,
               co.nome AS nome_conducente, co.cognome AS cognome_conducente, co.foto_profilo AS foto_conducente,
               cd.targa_moto, cd.marca_moto, cd.modello_moto, cd.cilindrata,
-              cd.valutazione_media AS valutazione_conducente_media
+              cd.valutazione_media AS valutazione_conducente_media,
+              cd.avatar_id AS avatar_conducente,
+              cd.verificato AS conducente_verificato,
+              cd.patente_verificata, cd.assicurazione_verificata,
+              cd.casco_passeggero_disponibile, cd.cuffia_igienica_disponibile,
+              (SELECT COUNT(*) FROM (
+                 SELECT valutazione_conducente FROM corse
+                   WHERE conducente_id = c.conducente_id AND valutazione_conducente IS NOT NULL
+                 UNION ALL
+                 SELECT valutazione_conducente FROM consegne
+                   WHERE conducente_id = c.conducente_id AND valutazione_conducente IS NOT NULL
+               ) recensioni)::int AS numero_recensioni_conducente
        FROM corse c
        LEFT JOIN users p ON c.passeggero_id = p.id
        LEFT JOIN users co ON c.conducente_id = co.id

@@ -251,7 +251,9 @@ router.get('/profilo', require('../middleware/auth').verificaToken, async (req, 
       `SELECT u.id, u.nome, u.cognome, u.email, u.telefono, u.ruolo, u.foto_profilo,
               c.numero_patente, c.targa_moto, c.marca_moto, c.modello_moto,
               c.tipo_servizio, c.cilindrata, c.disponibile, c.valutazione_media, c.totale_corse, c.verificato,
-              c.pallini_rossi, c.sospeso_fino, c.regole_ingaggio_accettate_il
+              c.pallini_rossi, c.sospeso_fino, c.regole_ingaggio_accettate_il,
+              c.avatar_id, c.patente_verificata, c.assicurazione_verificata,
+              c.casco_passeggero_disponibile, c.cuffia_igienica_disponibile
        FROM users u
        LEFT JOIN conducenti c ON u.id = c.user_id
        WHERE u.id = $1`,
@@ -263,6 +265,37 @@ router.get('/profilo', require('../middleware/auth').verificaToken, async (req, 
     }
 
     res.json(risultato.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// SCEGLI AVATAR (conducente)
+// ================================
+// Niente foto reali per i conducenti: ognuno sceglie un avatar a fumetto
+// tra un set fisso, definito anche lato app in avatar_moto_pass.dart.
+// Teniamo l'elenco valido anche qui, così non si può salvare un id
+// qualsiasi chiamando l'API direttamente.
+const AVATAR_VALIDI = Array.from({ length: 12 }, (_, i) => `avatar_${i + 1}`);
+
+router.put('/conducente/avatar', require('../middleware/auth').verificaToken, async (req, res) => {
+  if (req.utente.ruolo !== 'conducente') {
+    return res.status(403).json({ errore: 'Solo i conducenti possono scegliere un avatar' });
+  }
+
+  const { avatar_id } = req.body;
+  if (!AVATAR_VALIDI.includes(avatar_id)) {
+    return res.status(400).json({ errore: 'Avatar non valido' });
+  }
+
+  try {
+    await pool.query(
+      `UPDATE conducenti SET avatar_id = $1 WHERE user_id = $2`,
+      [avatar_id, req.utente.id]
+    );
+    res.json({ messaggio: 'Avatar aggiornato', avatar_id });
   } catch (err) {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });

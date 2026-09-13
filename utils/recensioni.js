@@ -8,9 +8,9 @@ const { pool } = require('../database');
 // sospeso temporaneamente: non può più accettare passaggi o consegne
 // finché la sospensione non scade. Valori "ragionevoli" di partenza,
 // facili da cambiare qui in un unico punto.
-const VOTO_NEGATIVO_MASSIMO = 2;   // 1 o 2 stelle = pallino rosso
-const SOGLIA_PALLINI_ROSSI = 5;    // oltre questa soglia (quindi al 6°) scatta la sospensione
-const GIORNI_SOSPENSIONE = 30;     // durata della sospensione
+const VOTO_NEGATIVO_MASSIMO = 2;   // 1 o 2 stelle = pallino rosso (una recensione negativa)
+const SOGLIA_PALLINI_ROSSI = 5;    // al 5° pallino rosso scatta la sospensione
+const GIORNI_SOSPENSIONE = 30;     // durata della sospensione (1 mese)
 
 // Se la sospensione di un conducente è scaduta, la rimuove (i pallini
 // rossi sono già stati azzerati quando è scattata la sospensione).
@@ -68,8 +68,9 @@ async function registraVotoConducente(conducenteUserId, voto) {
   );
   const pallini = aggiornato.rows[0]?.pallini_rossi ?? 1;
 
-  if (pallini > SOGLIA_PALLINI_ROSSI) {
-    // Troppi pallini rossi: sospensione temporanea, si riparte da 0.
+  if (pallini >= SOGLIA_PALLINI_ROSSI) {
+    // Raggiunta la soglia di pallini rossi: sospensione temporanea di un
+    // mese, poi si riparte da 0.
     await pool.query(
       `UPDATE conducenti
        SET sospeso_fino = NOW() + ($2 || ' days')::interval, pallini_rossi = 0

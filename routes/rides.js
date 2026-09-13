@@ -224,6 +224,23 @@ router.put('/:id/accetta', verificaToken, async (req, res) => {
   }
 
   try {
+    // Un conducente può avere un solo passaggio attivo alla volta: se ne ha
+    // già uno accettato o in corso, blocchiamo l'accettazione di un altro
+    // (altrimenti restano passaggi "fantasma" bloccati su In corso, mai
+    // portati a termine, e la lista delle richieste disponibili si svuota
+    // senza che nessuno l'abbia davvero presa in carico).
+    const corsaAttiva = await pool.query(
+      `SELECT id FROM corse
+       WHERE conducente_id = $1 AND stato IN ('accettata', 'in_corso')
+       LIMIT 1`,
+      [req.utente.id]
+    );
+    if (corsaAttiva.rows.length > 0) {
+      return res.status(409).json({
+        errore: 'Hai già un passaggio in corso: completalo prima di accettarne un altro'
+      });
+    }
+
     const risultato = await pool.query(
       `UPDATE corse
        SET stato = 'accettata', conducente_id = $1, accettata_il = NOW()

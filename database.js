@@ -220,6 +220,28 @@ const initDatabase = async () => {
       -- non solo un controllo lato app.
       ALTER TABLE conducenti
         ADD COLUMN IF NOT EXISTS regole_ingaggio_accettate_il TIMESTAMP;
+
+      -- Niente foto profilo reale per i conducenti, per tutelare la privacy:
+      -- ognuno sceglie un avatar a fumetto tra un set predefinito (vedi
+      -- lib/widgets/avatar_moto_pass.dart nell'app), mostrato al passeggero
+      -- al posto di una fotografia. 'avatar_1' come default finché non ne
+      -- sceglie uno.
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS avatar_id VARCHAR(20) NOT NULL DEFAULT 'avatar_1';
+
+      -- Bollini di verifica separati dal generico "verificato" (che resta
+      -- l'identità): patente, assicurazione e dotazione di sicurezza per il
+      -- passeggero. Non sono selezionabili dal conducente: partono tutti a
+      -- false e li attiva solo chi controlla i documenti, dalla schermata
+      -- di amministrazione (routes/admin.js).
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS patente_verificata BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS assicurazione_verificata BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS casco_passeggero_disponibile BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS cuffia_igienica_disponibile BOOLEAN NOT NULL DEFAULT false;
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

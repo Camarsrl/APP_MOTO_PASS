@@ -192,13 +192,24 @@ router.get('/:id', verificaToken, async (req, res) => {
               cd.verificato AS conducente_verificato,
               cd.patente_verificata, cd.assicurazione_verificata,
               cd.casco_passeggero_disponibile, cd.cuffia_igienica_disponibile,
-              (SELECT COUNT(*) FROM (
-                 SELECT valutazione_conducente FROM corse
+              -- Recensioni positive/negative (non più una media a stelle):
+              -- la soglia "> 2" è la stessa di VOTO_NEGATIVO_MASSIMO in
+              -- utils/recensioni.js, quindi resta coerente con i pallini
+              -- rossi che portano alla sospensione del conducente.
+              (SELECT COUNT(*) FILTER (WHERE voto > 2) FROM (
+                 SELECT valutazione_conducente AS voto FROM corse
                    WHERE conducente_id = c.conducente_id AND valutazione_conducente IS NOT NULL
                  UNION ALL
-                 SELECT valutazione_conducente FROM consegne
+                 SELECT valutazione_conducente AS voto FROM consegne
                    WHERE conducente_id = c.conducente_id AND valutazione_conducente IS NOT NULL
-               ) recensioni)::int AS numero_recensioni_conducente
+               ) recensioni)::int AS recensioni_positive,
+              (SELECT COUNT(*) FILTER (WHERE voto <= 2) FROM (
+                 SELECT valutazione_conducente AS voto FROM corse
+                   WHERE conducente_id = c.conducente_id AND valutazione_conducente IS NOT NULL
+                 UNION ALL
+                 SELECT valutazione_conducente AS voto FROM consegne
+                   WHERE conducente_id = c.conducente_id AND valutazione_conducente IS NOT NULL
+               ) recensioni)::int AS recensioni_negative
        FROM corse c
        LEFT JOIN users p ON c.passeggero_id = p.id
        LEFT JOIN users co ON c.conducente_id = co.id

@@ -242,6 +242,52 @@ const initDatabase = async () => {
         ADD COLUMN IF NOT EXISTS casco_passeggero_disponibile BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE conducenti
         ADD COLUMN IF NOT EXISTS cuffia_igienica_disponibile BOOLEAN NOT NULL DEFAULT false;
+
+      -- ================================
+      -- PAGAMENTI STRIPE
+      -- ================================
+      -- Il passeggero salva una carta (Stripe SetupIntent): non tocchiamo mai
+      -- il numero della carta, solo l'id del metodo di pagamento restituito
+      -- da Stripe e pochi dati non sensibili per mostrarlo in app (marca +
+      -- ultime 4 cifre). users.stripe_customer_id esiste già dalla creazione
+      -- della tabella.
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS stripe_payment_method_id VARCHAR(255);
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS metodo_pagamento_marca VARCHAR(20);
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS metodo_pagamento_ultime4 VARCHAR(4);
+
+      -- Il conducente collega un conto Stripe Connect Express (onboarding
+      -- ospitato da Stripe) per ricevere gli accrediti automaticamente.
+      -- users.stripe_account_id esiste già dalla creazione della tabella;
+      -- stripe_connect_pronto è una cache aggiornata da routes/payments.js
+      -- (sia dopo un controllo diretto sia dal webhook 'account.updated')
+      -- così l'app non deve interrogare Stripe ad ogni apertura schermata.
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS stripe_connect_pronto BOOLEAN NOT NULL DEFAULT false;
+
+      -- Esito dell'addebito al passeggero, mostrato nel riepilogo del
+      -- passaggio/consegna. Il pagamento viene tentato solo a fine corsa: un
+      -- fallimento (es. carta assente o rifiutata) non blocca mai il
+      -- completamento del passaggio/consegna.
+      ALTER TABLE corse
+        ADD COLUMN IF NOT EXISTS pagamento_stato VARCHAR(20) NOT NULL DEFAULT 'non_richiesto'
+          CHECK (pagamento_stato IN ('non_richiesto', 'riuscito', 'fallito'));
+      ALTER TABLE consegne
+        ADD COLUMN IF NOT EXISTS pagamento_stato VARCHAR(20) NOT NULL DEFAULT 'non_richiesto'
+          CHECK (pagamento_stato IN ('non_richiesto', 'riuscito', 'fallito'));
+      ALTER TABLE consegne
+        ADD COLUMN IF NOT EXISTS stripe_payment_intent VARCHAR(255);
+
+      -- La tabella "pagamenti" esisteva già pensata solo per le corse:
+      -- aggiungiamo il collegamento anche alle consegne e un tipo per
+      -- distinguerle, senza toccare le righe già presenti.
+      ALTER TABLE pagamenti
+        ADD COLUMN IF NOT EXISTS consegna_id INTEGER REFERENCES consegne(id);
+      ALTER TABLE pagamenti
+        ADD COLUMN IF NOT EXISTS tipo VARCHAR(20) NOT NULL DEFAULT 'corsa'
+          CHECK (tipo IN ('corsa', 'consegna'));
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

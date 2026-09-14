@@ -1,8 +1,33 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
+const path = require('path');
 const { pool } = require('../database');
 const { verificaToken } = require('../middleware/auth');
 const { conducenteSospeso, registraVotoConducente } = require('../utils/recensioni');
+const { eseguiAddebito } = require('./payments');
+
+// Foto opzionale dell'oggetto da consegnare: scritta dove server.js indica
+// (app.set('uploadDir', ...)), che su Render punta al Persistent Disk in
+// produzione. Limite 5 MB, solo immagini.
+const uploadFoto = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, path.join(req.app.get('uploadDir'), 'consegne'));
+    },
+    filename: (req, file, cb) => {
+      const estensione = path.extname(file.originalname) || '.jpg';
+      cb(null, `consegna_${req.params.id}_${Date.now()}${estensione}`);
+    }
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) {
+      return cb(new Error('Puoi caricare solo immagini'));
+    }
+    cb(null, true);
+  }
+});
 
 // ================================
 // LIMITI E TARIFFE CONSEGNA PACCHI
@@ -11,8 +36,13 @@ const { conducenteSospeso, registraVotoConducente } = require('../utils/recensio
 // non appena i responsabili confermano i limiti definitivi.
 const PESO_MASSIMO_KG = 5;        // peso massimo del pacco
 const DIMENSIONE_MASSIMA_CM = 40; // lato più lungo del pacco, in cm
-const SUPPLEMENTO_FISSO = 1.0;    // € fissi per ogni consegna
-const COSTO_PER_KM = 0.2;         // € per km, oltre al supplemento fisso
+const SUPPLEMENTO_FISSO = 1.0;    // € fissi per ogni consegna (netti per il conducente)
+const COSTO_PER_KM = 0.2;         // € per km, oltre al supplemento fisso (netti per il conducente)
+
+// L'app trattiene una commissione anche sulle consegne: il conducente
+// riceve sempre supplemento + km netti, il mittente paga un importo
+// maggiorato per coprire la commissione.
+const COMMISSIONE_APP = 0.30; // 30%
 
 // Categorie semplici che aiutano il conducente a capire a colpo d'occhio
 // cosa gli viene chiesto di trasportare.
@@ -60,9 +90,14 @@ router.post('/richiedi', verificaToken, async (req, res) => {
 
   try {
     const distanza = distanza_km ? parseFloat(distanza_km) : null;
-    const rimborso = distanza
-      ? (SUPPLEMENTO_FISSO + distanza * COSTO_PER_KM).toFixed(2)
-      : null;
+    let rimborsoConducente = null;
+    let rimborso = null; // quanto paga il mittente (include la commissione app)
+    let commissioneApp = null;
+    if (distanza) {
+      rimborsoConducente = Math.round((SUPPLEMENTO_FISSO + distanza * COSTO_PER_KM) * 100) / 100;
+      rimborso = Math.round((rimborsoConducente / (1 - COMMISSIONE_APP)) * 100) / 100;
+      commissioneApp = Math.round((rimborso - rimborsoConducente) * 100) / 100;
+    }
 
     const risultato = await pool.query(
       `INSERT INTO consegne (
@@ -71,8 +106,8 @@ router.post('/richiedi', verificaToken, async (req, res) => {
         consegna_indirizzo, consegna_lat, consegna_lng,
         descrizione_oggetto, categoria, peso_kg, dimensione_cm, distanza_km,
         destinatario_nome, destinatario_telefono, note,
-        rimborso_calcolato
-      ) VALUES ($1, 'richiesta', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        rimborso_calcolato, rimborso_conducente, commissione_app
+      ) VALUES ($1, 'richiesta', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
       RETURNING *`,
       [
         req.utente.id,
@@ -80,7 +115,7 @@ router.post('/richiedi', verificaToken, async (req, res) => {
         consegna_indirizzo, consegna_lat || null, consegna_lng || null,
         descrizione_oggetto, categoriaFinale, peso, dimensione, distanza,
         destinatario_nome, destinatario_telefono, note || null,
-        rimborso
+        rimborso, rimborsoConducente, commissioneApp
       ]
     );
 
@@ -92,6 +127,47 @@ router.post('/richiedi', verificaToken, async (req, res) => {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });
   }
+});
+
+// ================================
+// CARICA FOTO DELLA CONSEGNA (mittente, opzionale)
+// ================================
+router.post('/:id/foto', verificaToken, async (req, res) => {
+  // Verifichiamo che la consegna esista e sia del mittente PRIMA di
+  // scrivere qualunque file su disco.
+  try {
+    const consegna = await pool.query(
+      `SELECT id FROM consegne WHERE id = $1 AND mittente_id = $2`,
+      [req.params.id, req.utente.id]
+    );
+    if (consegna.rows.length === 0) {
+      return res.status(404).json({ errore: 'Consegna non trovata' });
+    }
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ errore: 'Errore del server' });
+  }
+
+  uploadFoto.single('foto')(req, res, async (err) => {
+    if (err) {
+      return res.status(400).json({ errore: err.message || 'Errore nel caricamento della foto' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ errore: 'Nessuna foto ricevuta' });
+    }
+
+    try {
+      const fotoUrl = `/uploads/consegne/${req.file.filename}`;
+      const risultato = await pool.query(
+        `UPDATE consegne SET foto_url = $1 WHERE id = $2 RETURNING *`,
+        [fotoUrl, req.params.id]
+      );
+      res.json({ messaggio: 'Foto caricata', consegna: risultato.rows[0] });
+    } catch (dbErr) {
+      console.error(dbErr);
+      res.status(500).json({ errore: 'Errore del server' });
+    }
+  });
 });
 
 // ================================
@@ -203,9 +279,34 @@ router.put('/:id/consegnata', verificaToken, async (req, res) => {
       return res.status(404).json({ errore: 'Consegna non trovata' });
     }
 
+    const consegna = risultato.rows[0];
+
+    // Come per i passaggi: l'addebito avviene solo ora, a consegna
+    // conclusa. Un eventuale fallimento non annulla la consegna già svolta,
+    // viene solo registrato e mostrato in app.
+    let esito = { riuscito: false, motivoErrore: 'Importo non calcolato (distanza non indicata alla richiesta)' };
+    if (consegna.rimborso_calcolato != null && consegna.rimborso_conducente != null) {
+      esito = await eseguiAddebito({
+        tipo: 'consegna',
+        riferimentoId: consegna.id,
+        passeggeroId: consegna.mittente_id,
+        conducenteId: consegna.conducente_id,
+        importoPasseggero: parseFloat(consegna.rimborso_calcolato),
+        importoConducente: parseFloat(consegna.rimborso_conducente),
+        commissioneApp: parseFloat(consegna.commissione_app || 0)
+      });
+    }
+
+    const aggiornata = await pool.query(
+      `UPDATE consegne SET pagamento_stato = $1, stripe_payment_intent = $2 WHERE id = $3 RETURNING *`,
+      [esito.riuscito ? 'riuscito' : 'fallito', esito.paymentIntentId || null, consegna.id]
+    );
+
     res.json({
-      messaggio: 'Consegna completata! ✅',
-      consegna: risultato.rows[0]
+      messaggio: esito.riuscito
+        ? 'Consegna completata! Il pagamento è andato a buon fine.'
+        : `Consegna completata, ma il pagamento non è riuscito (${esito.motivoErrore}).`,
+      consegna: aggiornata.rows[0]
     });
   } catch (err) {
     console.error(err);

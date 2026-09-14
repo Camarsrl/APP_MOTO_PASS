@@ -3,6 +3,7 @@ const router = express.Router();
 const { pool } = require('../database');
 const { verificaToken } = require('../middleware/auth');
 const { conducenteSospeso, registraVotoConducente } = require('../utils/recensioni');
+const { eseguiAddebito } = require('./payments');
 
 // Tariffa pagata dal passeggero: €1 al km, con una spesa minima di €4
 // a corsa (anche per tragitti brevissimi).
@@ -477,9 +478,31 @@ router.put('/:id/completa', verificaToken, async (req, res) => {
       return res.status(404).json({ errore: 'Corsa non trovata' });
     }
 
+    const corsa = risultato.rows[0];
+
+    // L'addebito avviene solo ora, a corsa conclusa: un eventuale fallimento
+    // (carta assente/rifiutata) non deve annullare il passaggio, già
+    // regolarmente svolto. L'esito viene solo registrato e mostrato in app.
+    const esito = await eseguiAddebito({
+      tipo: 'corsa',
+      riferimentoId: corsa.id,
+      passeggeroId: corsa.passeggero_id,
+      conducenteId: corsa.conducente_id,
+      importoPasseggero: rimborsoCalcolato,
+      importoConducente: rimborsoConducente,
+      commissioneApp
+    });
+
+    const aggiornata = await pool.query(
+      `UPDATE corse SET pagamento_stato = $1, stripe_payment_intent = $2 WHERE id = $3 RETURNING *`,
+      [esito.riuscito ? 'riuscito' : 'fallito', esito.paymentIntentId || null, corsa.id]
+    );
+
     res.json({
-      messaggio: 'Corsa completata! Il rimborso sarà accreditato a breve.',
-      corsa: risultato.rows[0]
+      messaggio: esito.riuscito
+        ? 'Corsa completata! Il pagamento è andato a buon fine.'
+        : `Corsa completata, ma il pagamento non è riuscito (${esito.motivoErrore}).`,
+      corsa: aggiornata.rows[0]
     });
   } catch (err) {
     console.error(err);

@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { Server } = require('socket.io');
 const { initDatabase } = require('./database');
 
@@ -20,8 +22,37 @@ const io = new Server(server, {
 // MIDDLEWARE
 // ================================
 app.use(cors());
+
+// ================================
+// WEBHOOK STRIPE
+// ================================
+// Va registrato PRIMA di express.json(), con express.raw(): Stripe firma il
+// body "grezzo" della richiesta, quindi se il body fosse già stato
+// interpretato come JSON da express.json() la verifica della firma
+// (routes/payments.js -> gestisciWebhook) fallirebbe sempre. Per lo stesso
+// motivo questa route resta qui, direttamente su app, e NON dentro il
+// router di routes/payments.js (che invece è montato più sotto, dopo
+// express.json(), per tutte le altre rotte di /api/pagamenti).
+const pagamentiRouter = require('./routes/payments');
+app.post('/api/pagamenti/webhook', express.raw({ type: 'application/json' }), pagamentiRouter.gestisciWebhook);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ================================
+// FILE CARICATI (foto consegne)
+// ================================
+// Su un piano Render a pagamento con un Persistent Disk collegato,
+// impostare la variabile d'ambiente UPLOAD_DIR con il percorso di mount
+// del disco (es. /data) così le foto restano tra un deploy e l'altro,
+// invece di essere cancellate ad ogni riavvio come sul piano gratuito. In
+// locale, senza questa variabile, i file finiscono in una cartella
+// "uploads" accanto al codice.
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
+fs.mkdirSync(path.join(UPLOAD_DIR, 'consegne'), { recursive: true });
+app.use('/uploads', express.static(UPLOAD_DIR));
+// Le routes che gestiscono l'upload leggono da qui dove scrivere.
+app.set('uploadDir', UPLOAD_DIR);
 
 // ================================
 // ROUTES
@@ -30,7 +61,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/corse', require('./routes/rides'));
 app.use('/api/consegne', require('./routes/consegne'));
 app.use('/api/admin', require('./routes/admin'));
-app.use('/api/pagamenti', require('./routes/payments'));
+app.use('/api/pagamenti', pagamentiRouter);
 
 // Route di test
 app.get('/', (req, res) => {

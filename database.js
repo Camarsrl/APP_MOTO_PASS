@@ -288,6 +288,54 @@ const initDatabase = async () => {
       ALTER TABLE pagamenti
         ADD COLUMN IF NOT EXISTS tipo VARCHAR(20) NOT NULL DEFAULT 'corsa'
           CHECK (tipo IN ('corsa', 'consegna'));
+
+      -- ================================
+      -- SMARRIMENTO PACCHI (consegne)
+      -- ================================
+      -- Il mittente può segnalare che un pacco non è arrivato: raccogliamo
+      -- solo poche informazioni con un modulo guidato (nessuna IA), e la
+      -- decisione se rimborsare resta sempre a chi gestisce l'assistenza
+      -- (schermata di amministrazione), mai automatica.
+      CREATE TABLE IF NOT EXISTS segnalazioni_smarrimento (
+        id SERIAL PRIMARY KEY,
+        consegna_id INTEGER NOT NULL REFERENCES consegne(id),
+        mittente_id INTEGER NOT NULL REFERENCES users(id),
+        contattato_conducente BOOLEAN NOT NULL DEFAULT false,
+        dettagli TEXT NOT NULL,
+        stato VARCHAR(30) NOT NULL DEFAULT 'aperta'
+          CHECK (stato IN ('aperta', 'risolta_rimborsata', 'risolta_senza_rimborso')),
+        note_risoluzione TEXT,
+        creata_il TIMESTAMP DEFAULT NOW(),
+        risolta_il TIMESTAMP
+      );
+
+      -- Segna un pagamento "in contestazione" quando è aperta una
+      -- segnalazione di smarrimento sulla consegna collegata: è un
+      -- promemoria visibile in amministrazione, non un blocco automatico
+      -- dell'accredito (Stripe accredita il conducente in tempi brevi e non
+      -- offre un modo semplice per sospenderlo in anticipo). In caso di
+      -- rimborso, l'importo viene comunque recuperato anche dal conducente
+      -- tramite il rimborso Stripe con storno del trasferimento.
+      ALTER TABLE pagamenti
+        ADD COLUMN IF NOT EXISTS contestato BOOLEAN NOT NULL DEFAULT false;
+
+      -- Chat tra mittente e conducente, solo mentre una segnalazione di
+      -- smarrimento è aperta: serve a chiarire subito il problema, non è
+      -- una messaggistica generale dell'app. Niente notifiche push: l'app
+      -- controlla i nuovi messaggi mentre la schermata è aperta.
+      CREATE TABLE IF NOT EXISTS messaggi_smarrimento (
+        id SERIAL PRIMARY KEY,
+        segnalazione_id INTEGER NOT NULL REFERENCES segnalazioni_smarrimento(id),
+        autore_id INTEGER NOT NULL REFERENCES users(id),
+        testo TEXT NOT NULL,
+        creato_il TIMESTAMP DEFAULT NOW()
+      );
+
+      -- Foto obbligatoria che il conducente scatta al pacco nel momento del
+      -- ritiro (prova archiviata nell'app, diversa dalla foto facoltativa
+      -- che il mittente può allegare quando crea la richiesta).
+      ALTER TABLE consegne
+        ADD COLUMN IF NOT EXISTS foto_ritiro_url VARCHAR(500);
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

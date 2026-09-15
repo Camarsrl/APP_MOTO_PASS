@@ -36,6 +36,12 @@ const uploadFoto = multer({
 // non appena i responsabili confermano i limiti definitivi.
 const PESO_MASSIMO_KG = 5;        // peso massimo del pacco
 const DIMENSIONE_MASSIMA_CM = 40; // lato più lungo del pacco, in cm
+
+// Soglia "pacco piccolo": è quello che una bici può trasportare. Minicar e
+// scooter non hanno questa restrizione, vedono/accettano consegne fino ai
+// limiti generali qui sopra.
+const PESO_MASSIMO_BICI_KG = 2;
+const DIMENSIONE_MASSIMA_BICI_CM = 20;
 const SUPPLEMENTO_FISSO = 1.0;    // € fissi per ogni consegna (netti per il conducente)
 const COSTO_PER_KM = 0.2;         // € per km, oltre al supplemento fisso (netti per il conducente)
 
@@ -250,13 +256,28 @@ router.get('/disponibili', verificaToken, async (req, res) => {
   }
 
   try {
+    // Chi ha impostato "solo passeggeri" non vede consegne. La bici in più
+    // vede solo i pacchi piccoli (peso/dimensione entro le soglie sopra):
+    // minicar e scooter vedono tutte le consegne fino ai limiti generali.
+    const profilo = await pool.query(
+      `SELECT tipo_veicolo, tipo_servizio FROM conducenti WHERE user_id = $1`,
+      [req.utente.id]
+    );
+    const p = profilo.rows[0];
+    if (!p || p.tipo_servizio === 'passeggeri') {
+      return res.json({ consegne: [] });
+    }
+
+    const soloPiccoli = p.tipo_veicolo === 'bici';
     const risultato = await pool.query(
       `SELECT c.*, u.nome AS nome_mittente, u.cognome AS cognome_mittente
        FROM consegne c
        JOIN users u ON c.mittente_id = u.id
        WHERE c.stato = 'richiesta'
+         AND ($1::boolean = false OR (c.peso_kg <= $2 AND c.dimensione_cm <= $3))
        ORDER BY c.creata_il DESC
-       LIMIT 30`
+       LIMIT 30`,
+      [soloPiccoli, PESO_MASSIMO_BICI_KG, DIMENSIONE_MASSIMA_BICI_CM]
     );
 
     res.json({ consegne: risultato.rows });
@@ -283,6 +304,31 @@ router.put('/:id/accetta', verificaToken, async (req, res) => {
   }
 
   try {
+    // Stessa regola di GET /disponibili, controllata di nuovo qui: "solo
+    // passeggeri" non accetta consegne, e una bici non può accettare un
+    // pacco più grande della soglia "piccolo", anche chiamando l'API
+    // direttamente.
+    const profiloRes = await pool.query(
+      `SELECT tipo_veicolo, tipo_servizio FROM conducenti WHERE user_id = $1`,
+      [req.utente.id]
+    );
+    const profilo = profiloRes.rows[0];
+    if (!profilo || profilo.tipo_servizio === 'passeggeri') {
+      return res.status(403).json({ errore: 'Il tuo profilo non è abilitato alle consegne' });
+    }
+    if (profilo.tipo_veicolo === 'bici') {
+      const consegnaRes = await pool.query(
+        `SELECT peso_kg, dimensione_cm FROM consegne WHERE id = $1`,
+        [req.params.id]
+      );
+      const c = consegnaRes.rows[0];
+      if (c && (parseFloat(c.peso_kg) > PESO_MASSIMO_BICI_KG || parseFloat(c.dimensione_cm) > DIMENSIONE_MASSIMA_BICI_CM)) {
+        return res.status(403).json({
+          errore: `Con una bici puoi accettare solo pacchi fino a ${PESO_MASSIMO_BICI_KG} kg e ${DIMENSIONE_MASSIMA_BICI_CM} cm`
+        });
+      }
+    }
+
     const risultato = await pool.query(
       `UPDATE consegne
        SET stato = 'accettata', conducente_id = $1, accettata_il = NOW()

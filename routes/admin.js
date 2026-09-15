@@ -35,7 +35,7 @@ router.get('/conducenti', verificaSegretoAdmin, async (req, res) => {
   try {
     const risultato = await pool.query(
       `SELECT u.id, u.nome, u.cognome, u.telefono, u.email,
-              c.targa_moto, c.marca_moto, c.modello_moto, c.numero_patente,
+              c.targa_moto, c.marca_moto, c.modello_moto, c.numero_patente, c.tipo_veicolo,
               c.avatar_id, c.verificato, c.patente_verificata,
               c.assicurazione_verificata, c.casco_passeggero_disponibile,
               c.cuffia_igienica_disponibile

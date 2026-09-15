@@ -357,6 +357,29 @@ const initDatabase = async () => {
       ALTER TABLE corse
         ADD COLUMN IF NOT EXISTS veicolo_preferito VARCHAR(20)
           CHECK (veicolo_preferito IS NULL OR veicolo_preferito IN ('scooter', 'minicar'));
+
+      -- ================================
+      -- ASSISTENTE IA per le segnalazioni di smarrimento
+      -- ================================
+      -- L'assistente automatico di primo livello risponde nella chat tra
+      -- mittente e conducente quando si apre una segnalazione: raccoglie i
+      -- dettagli mancanti e, per i casi più delicati (incidenti con feriti,
+      -- sospette frodi, rimborsi importanti), smette di rispondere nel
+      -- merito e segnala che serve un operatore umano (richiede_operatore).
+      -- La decisione finale su un eventuale rimborso resta sempre a una
+      -- persona: vedi routes/admin.js.
+      -- I suoi messaggi condividono la stessa tabella di quelli tra le
+      -- persone, distinti da autore_tipo; autore_id diventa opzionale
+      -- perché un messaggio dell'IA non ha un utente collegato.
+      ALTER TABLE messaggi_smarrimento
+        ADD COLUMN IF NOT EXISTS autore_tipo VARCHAR(10) NOT NULL DEFAULT 'utente'
+          CHECK (autore_tipo IN ('utente', 'ia'));
+      ALTER TABLE messaggi_smarrimento ALTER COLUMN autore_id DROP NOT NULL;
+
+      ALTER TABLE segnalazioni_smarrimento
+        ADD COLUMN IF NOT EXISTS richiede_operatore BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE segnalazioni_smarrimento
+        ADD COLUMN IF NOT EXISTS riepilogo_ia TEXT;
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

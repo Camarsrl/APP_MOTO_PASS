@@ -80,7 +80,7 @@ router.post('/richiedi', verificaToken, async (req, res) => {
   const {
     partenza_indirizzo, partenza_lat, partenza_lng,
     destinazione_indirizzo, destinazione_lat, destinazione_lng,
-    cilindrata_preferita
+    cilindrata_preferita, veicolo_preferito
   } = req.body;
 
   if (!partenza_indirizzo || !destinazione_indirizzo) {
@@ -92,20 +92,27 @@ router.post('/richiedi', verificaToken, async (req, res) => {
     ? cilindrata_preferita
     : null;
 
+  // Idem per la preferenza di veicolo (scooter o minicar, le uniche due che
+  // danno passaggi): solo informativa, non filtra chi può accettare.
+  const veicoliPreferitiValidi = ['scooter', 'minicar'];
+  const veicoloPreferitoFinale = veicoliPreferitiValidi.includes(veicolo_preferito)
+    ? veicolo_preferito
+    : null;
+
   try {
     const risultato = await pool.query(
       `INSERT INTO corse (
         passeggero_id, stato,
         partenza_indirizzo, partenza_lat, partenza_lng,
         destinazione_indirizzo, destinazione_lat, destinazione_lng,
-        cilindrata_preferita
-      ) VALUES ($1, 'in_attesa', $2, $3, $4, $5, $6, $7, $8)
+        cilindrata_preferita, veicolo_preferito
+      ) VALUES ($1, 'in_attesa', $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *`,
       [
         req.utente.id,
         partenza_indirizzo, partenza_lat || null, partenza_lng || null,
         destinazione_indirizzo, destinazione_lat || null, destinazione_lng || null,
-        cilindrataFinale
+        cilindrataFinale, veicoloPreferitoFinale
       ]
     );
 
@@ -134,6 +141,18 @@ router.get('/disponibili', verificaToken, async (req, res) => {
   }
 
   try {
+    // Bici e conducenti impostati su "solo pacchi" non fanno passaggi:
+    // lista vuota, non un errore, perché è una condizione normale (in app
+    // questa schermata non è comunque raggiungibile in quel caso).
+    const profilo = await pool.query(
+      `SELECT tipo_veicolo, tipo_servizio FROM conducenti WHERE user_id = $1`,
+      [req.utente.id]
+    );
+    const p = profilo.rows[0];
+    if (!p || p.tipo_veicolo === 'bici' || p.tipo_servizio === 'pacchi') {
+      return res.json({ corse: [] });
+    }
+
     const risultato = await pool.query(
       `SELECT c.*, u.nome AS nome_passeggero, u.cognome AS cognome_passeggero
        FROM corse c
@@ -187,7 +206,7 @@ router.get('/:id', verificaToken, async (req, res) => {
       `SELECT c.*,
               p.nome AS nome_passeggero, p.cognome AS cognome_passeggero, p.foto_profilo AS foto_passeggero,
               co.nome AS nome_conducente, co.cognome AS cognome_conducente, co.foto_profilo AS foto_conducente,
-              cd.targa_moto, cd.marca_moto, cd.modello_moto, cd.cilindrata,
+              cd.targa_moto, cd.marca_moto, cd.modello_moto, cd.cilindrata, cd.tipo_veicolo,
               cd.valutazione_media AS valutazione_conducente_media,
               cd.avatar_id AS avatar_conducente,
               cd.verificato AS conducente_verificato,
@@ -247,6 +266,20 @@ router.put('/:id/accetta', verificaToken, async (req, res) => {
   }
 
   try {
+    // Stessa regola di GET /disponibili, controllata di nuovo qui: una bici
+    // (o un profilo impostato su "solo pacchi") non può accettare un
+    // passaggio persone, anche chiamando questa API direttamente.
+    const profilo = await pool.query(
+      `SELECT tipo_veicolo, tipo_servizio FROM conducenti WHERE user_id = $1`,
+      [req.utente.id]
+    );
+    const p = profilo.rows[0];
+    if (!p || p.tipo_veicolo === 'bici' || p.tipo_servizio === 'pacchi') {
+      return res.status(403).json({
+        errore: 'Il tuo profilo non è abilitato ai passaggi persone'
+      });
+    }
+
     // Un conducente può avere un solo passaggio attivo alla volta: se ne ha
     // già uno accettato o in corso, blocchiamo l'accettazione di un altro
     // (altrimenti restano passaggi "fantasma" bloccati su In corso, mai

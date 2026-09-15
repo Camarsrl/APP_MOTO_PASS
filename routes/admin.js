@@ -89,7 +89,10 @@ router.put('/conducenti/:id/verifica', verificaSegretoAdmin, async (req, res) =>
 // SEGNALAZIONI DI PACCHI SMARRITI
 // ================================
 // Elenco delle segnalazioni aperte, per decidere caso per caso (mai in modo
-// automatico) se rimborsare il mittente.
+// automatico) se rimborsare il mittente. richiede_operatore e riepilogo_ia
+// (dentro s.*) sono impostati dall'assistente IA quando la situazione va
+// oltre quello che può gestire da solo: quelle segnalazioni vengono per
+// prime, così chi fa assistenza le vede subito.
 router.get('/segnalazioni-smarrimento', verificaSegretoAdmin, async (req, res) => {
   try {
     const risultato = await pool.query(
@@ -105,7 +108,7 @@ router.get('/segnalazioni-smarrimento', verificaSegretoAdmin, async (req, res) =
        LEFT JOIN users co ON c.conducente_id = co.id
        LEFT JOIN pagamenti p ON p.consegna_id = c.id
        WHERE s.stato = 'aperta'
-       ORDER BY s.creata_il ASC`
+       ORDER BY s.richiede_operatore DESC, s.creata_il ASC`
     );
     res.json({ segnalazioni: risultato.rows });
   } catch (err) {

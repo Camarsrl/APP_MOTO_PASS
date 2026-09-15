@@ -62,12 +62,21 @@ router.post('/registra/conducente', async (req, res) => {
   const {
     nome, cognome, email, password, telefono,
     numero_patente, tipo_patente, targa_moto,
-    marca_moto, modello_moto, iban, tipo_servizio, cilindrata,
+    marca_moto, modello_moto, iban, tipo_servizio, cilindrata, tipo_veicolo,
     accetta_regole_ingaggio
   } = req.body;
 
+  // Tipo di veicolo: scooter (default, comportamento di sempre), bici o
+  // minicar. La bici non ha una targa, quindi per lei non la richiediamo;
+  // per scooter e minicar (veicoli veri e propri) resta obbligatoria.
+  const tipiVeicoloValidi = ['scooter', 'bici', 'minicar'];
+  const tipoVeicoloFinale = tipiVeicoloValidi.includes(tipo_veicolo)
+    ? tipo_veicolo
+    : 'scooter';
+
   if (!nome || !cognome || !email || !password || !telefono ||
-      !numero_patente || !tipo_patente || !targa_moto || !iban) {
+      !numero_patente || !tipo_patente || !iban ||
+      (tipoVeicoloFinale !== 'bici' && !targa_moto)) {
     return res.status(400).json({ errore: 'Tutti i campi sono obbligatori' });
   }
 
@@ -82,11 +91,13 @@ router.post('/registra/conducente', async (req, res) => {
   }
 
   // Il tipo di servizio è opzionale: se non specificato (o non valido) il
-  // conducente viene registrato per entrambi i servizi.
+  // conducente viene registrato per entrambi i servizi. La bici però non
+  // può mai trasportare persone: qualunque cosa arrivi dal client, per lei
+  // forziamo "solo pacchi" anche qui lato server, non solo in app.
   const tipiServizioValidi = ['passeggeri', 'pacchi', 'entrambi'];
-  const tipoServizioFinale = tipiServizioValidi.includes(tipo_servizio)
-    ? tipo_servizio
-    : 'entrambi';
+  const tipoServizioFinale = tipoVeicoloFinale === 'bici'
+    ? 'pacchi'
+    : (tipiServizioValidi.includes(tipo_servizio) ? tipo_servizio : 'entrambi');
 
   // Cilindrata dello scooter, per fasce: se non specificata (o non valida)
   // usiamo una fascia intermedia di default.
@@ -123,10 +134,10 @@ router.post('/registra/conducente', async (req, res) => {
     // solo un controllo lato app.
     await client.query(
       `INSERT INTO conducenti
-       (user_id, numero_patente, tipo_patente, targa_moto, marca_moto, modello_moto, iban, tipo_servizio, cilindrata, regole_ingaggio_accettate_il)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
+       (user_id, numero_patente, tipo_patente, targa_moto, marca_moto, modello_moto, iban, tipo_servizio, cilindrata, tipo_veicolo, regole_ingaggio_accettate_il)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
       [utente.rows[0].id, numero_patente, tipo_patente,
-       targa_moto, marca_moto, modello_moto, iban, tipoServizioFinale, cilindrataFinale]
+       targa_moto || null, marca_moto, modello_moto, iban, tipoServizioFinale, cilindrataFinale, tipoVeicoloFinale]
     );
 
     await client.query('COMMIT');
@@ -141,7 +152,12 @@ router.post('/registra/conducente', async (req, res) => {
     res.status(201).json({
       messaggio: 'Registrazione conducente completata! In attesa di verifica.',
       token,
-      utente: { ...utente.rows[0], tipo_servizio: tipoServizioFinale, cilindrata: cilindrataFinale }
+      utente: {
+        ...utente.rows[0],
+        tipo_servizio: tipoServizioFinale,
+        cilindrata: cilindrataFinale,
+        tipo_veicolo: tipoVeicoloFinale
+      }
     });
 
   } catch (err) {
@@ -225,6 +241,19 @@ router.put('/tipo-servizio', require('../middleware/auth').verificaToken, async 
   }
 
   try {
+    // La bici non può mai offrire passaggi persone: se chi ha una bici
+    // prova a impostare "passeggeri" o "entrambi" (es. app non aggiornata),
+    // lo blocchiamo qui, non solo in app.
+    const conducente = await pool.query(
+      `SELECT tipo_veicolo FROM conducenti WHERE user_id = $1`,
+      [req.utente.id]
+    );
+    if (conducente.rows[0]?.tipo_veicolo === 'bici' && tipo_servizio !== 'pacchi') {
+      return res.status(400).json({
+        errore: 'Con una bici puoi offrire solo consegne di piccoli pacchi, non passaggi persone'
+      });
+    }
+
     await pool.query(
       `UPDATE conducenti SET tipo_servizio = $1 WHERE user_id = $2`,
       [tipo_servizio, req.utente.id]
@@ -250,7 +279,7 @@ router.get('/profilo', require('../middleware/auth').verificaToken, async (req, 
     const risultato = await pool.query(
       `SELECT u.id, u.nome, u.cognome, u.email, u.telefono, u.ruolo, u.foto_profilo,
               c.numero_patente, c.targa_moto, c.marca_moto, c.modello_moto,
-              c.tipo_servizio, c.cilindrata, c.disponibile, c.valutazione_media, c.totale_corse, c.verificato,
+              c.tipo_servizio, c.cilindrata, c.tipo_veicolo, c.disponibile, c.valutazione_media, c.totale_corse, c.verificato,
               c.pallini_rossi, c.sospeso_fino, c.regole_ingaggio_accettate_il,
               c.avatar_id, c.patente_verificata, c.assicurazione_verificata,
               c.casco_passeggero_disponibile, c.cuffia_igienica_disponibile

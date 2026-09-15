@@ -171,6 +171,77 @@ router.post('/:id/foto', verificaToken, async (req, res) => {
 });
 
 // ================================
+// CARICA FOTO DEL RITIRO (conducente, obbligatoria per confermare il ritiro)
+// ================================
+// Diversa dalla foto facoltativa del mittente qui sopra: questa la scatta
+// il conducente sul posto, al momento di prendere in carico il pacco, ed è
+// la prova che resta archiviata nell'app. Va caricata mentre la consegna è
+// ancora 'accettata' (prima di confermare il ritiro, vedi PUT /:id/ritirata
+// qui sotto, che ora richiede che questa foto esista già).
+const uploadFotoRitiro = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, path.join(req.app.get('uploadDir'), 'consegne'));
+    },
+    filename: (req, file, cb) => {
+      const estensione = path.extname(file.originalname) || '.jpg';
+      cb(null, `ritiro_${req.params.id}_${Date.now()}${estensione}`);
+    }
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) {
+      return cb(new Error('Puoi caricare solo immagini'));
+    }
+    cb(null, true);
+  }
+});
+
+router.post('/:id/foto-ritiro', verificaToken, async (req, res) => {
+  if (req.utente.ruolo !== 'conducente') {
+    return res.status(403).json({ errore: 'Solo il conducente può caricare la foto del ritiro' });
+  }
+
+  // Verifichiamo che la consegna sia assegnata a questo conducente e non
+  // ancora ritirata PRIMA di scrivere qualunque file su disco.
+  try {
+    const consegna = await pool.query(
+      `SELECT id FROM consegne WHERE id = $1 AND conducente_id = $2 AND stato = 'accettata'`,
+      [req.params.id, req.utente.id]
+    );
+    if (consegna.rows.length === 0) {
+      return res.status(404).json({
+        errore: 'Consegna non trovata, non assegnata a te, oppure già ritirata'
+      });
+    }
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ errore: 'Errore del server' });
+  }
+
+  uploadFotoRitiro.single('foto')(req, res, async (err) => {
+    if (err) {
+      return res.status(400).json({ errore: err.message || 'Errore nel caricamento della foto' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ errore: 'Nessuna foto ricevuta' });
+    }
+
+    try {
+      const fotoUrl = `/uploads/consegne/${req.file.filename}`;
+      const risultato = await pool.query(
+        `UPDATE consegne SET foto_ritiro_url = $1 WHERE id = $2 RETURNING *`,
+        [fotoUrl, req.params.id]
+      );
+      res.json({ messaggio: 'Foto del ritiro caricata', consegna: risultato.rows[0] });
+    } catch (dbErr) {
+      console.error(dbErr);
+      res.status(500).json({ errore: 'Errore del server' });
+    }
+  });
+});
+
+// ================================
 // CONSEGNE DISPONIBILI (per conducenti)
 // ================================
 router.get('/disponibili', verificaToken, async (req, res) => {
@@ -239,16 +310,22 @@ router.put('/:id/accetta', verificaToken, async (req, res) => {
 // ================================
 router.put('/:id/ritirata', verificaToken, async (req, res) => {
   try {
+    // La foto del ritiro (vedi POST /:id/foto-ritiro qui sopra) è
+    // obbligatoria: senza, la richiesta non trova righe da aggiornare e
+    // torniamo un errore che lo spiega chiaramente all'utente.
     const risultato = await pool.query(
       `UPDATE consegne
        SET stato = 'ritirata', ritirata_il = NOW()
        WHERE id = $1 AND conducente_id = $2 AND stato = 'accettata'
+             AND foto_ritiro_url IS NOT NULL
        RETURNING *`,
       [req.params.id, req.utente.id]
     );
 
     if (risultato.rows.length === 0) {
-      return res.status(404).json({ errore: 'Consegna non trovata' });
+      return res.status(404).json({
+        errore: 'Consegna non trovata, oppure devi prima fare una foto del pacco al ritiro'
+      });
     }
 
     res.json({
@@ -308,6 +385,152 @@ router.put('/:id/consegnata', verificaToken, async (req, res) => {
         : `Consegna completata, ma il pagamento non è riuscito (${esito.motivoErrore}).`,
       consegna: aggiornata.rows[0]
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// SEGNALA PACCO SMARRITO (mittente)
+// ================================
+// Modulo guidato con poche domande fisse (nessuna IA): raccoglie la
+// segnalazione, ma la decisione se rimborsare resta sempre a chi gestisce
+// l'assistenza (vedi routes/admin.js), mai automatica.
+router.post('/:id/segnala-smarrimento', verificaToken, async (req, res) => {
+  const contattatoConducente = req.body.contattato_conducente === true;
+  const dettagli = req.body.dettagli?.toString().trim();
+
+  if (!dettagli) {
+    return res.status(400).json({ errore: 'Descrivi cosa è successo' });
+  }
+
+  try {
+    const consegna = await pool.query(
+      `SELECT * FROM consegne WHERE id = $1 AND mittente_id = $2`,
+      [req.params.id, req.utente.id]
+    );
+    if (consegna.rows.length === 0) {
+      return res.status(404).json({ errore: 'Consegna non trovata' });
+    }
+
+    const c = consegna.rows[0];
+    if (!['ritirata', 'consegnata'].includes(c.stato)) {
+      return res.status(400).json({
+        errore: 'Puoi segnalare uno smarrimento solo dopo che il pacco è stato ritirato'
+      });
+    }
+
+    const giaAperta = await pool.query(
+      `SELECT id FROM segnalazioni_smarrimento WHERE consegna_id = $1 AND stato = 'aperta'`,
+      [req.params.id]
+    );
+    if (giaAperta.rows.length > 0) {
+      return res.status(400).json({ errore: 'Hai già una segnalazione aperta per questa consegna' });
+    }
+
+    await pool.query(
+      `INSERT INTO segnalazioni_smarrimento (consegna_id, mittente_id, contattato_conducente, dettagli)
+       VALUES ($1, $2, $3, $4)`,
+      [req.params.id, req.utente.id, contattatoConducente, dettagli]
+    );
+
+    // Promemoria visibile in amministrazione: non blocca da solo l'accredito
+    // già avviato su Stripe, ma segnala il pagamento come "in contestazione".
+    await pool.query(
+      `UPDATE pagamenti SET contestato = true WHERE consegna_id = $1`,
+      [req.params.id]
+    );
+
+    res.status(201).json({ messaggio: 'Segnalazione inviata. Ti risponderemo al più presto.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// CHAT SULLA SEGNALAZIONE DI SMARRIMENTO (mittente e conducente)
+// ================================
+// Esiste solo mentre una segnalazione è aperta: serve a chiarire subito il
+// problema tra le due persone coinvolte, non è una messaggistica generale
+// dell'app. Nessuna notifica push: l'app controlla i nuovi messaggi
+// mentre questa schermata è aperta.
+router.get('/:id/segnalazione/messaggi', verificaToken, async (req, res) => {
+  try {
+    const consegna = await pool.query(`SELECT * FROM consegne WHERE id = $1`, [req.params.id]);
+    if (consegna.rows.length === 0) {
+      return res.status(404).json({ errore: 'Consegna non trovata' });
+    }
+    const c = consegna.rows[0];
+    if (c.mittente_id !== req.utente.id && c.conducente_id !== req.utente.id) {
+      return res.status(403).json({ errore: 'Non hai accesso a questa consegna' });
+    }
+
+    const segnalazione = await pool.query(
+      `SELECT id FROM segnalazioni_smarrimento
+       WHERE consegna_id = $1 AND stato = 'aperta'
+       ORDER BY creata_il DESC LIMIT 1`,
+      [req.params.id]
+    );
+    if (segnalazione.rows.length === 0) {
+      return res.json({ segnalazione_aperta: false, messaggi: [] });
+    }
+
+    const messaggi = await pool.query(
+      `SELECT m.id, m.testo, m.creato_il, m.autore_id, u.nome, u.cognome
+       FROM messaggi_smarrimento m
+       JOIN users u ON m.autore_id = u.id
+       WHERE m.segnalazione_id = $1
+       ORDER BY m.creato_il ASC`,
+      [segnalazione.rows[0].id]
+    );
+
+    res.json({
+      segnalazione_aperta: true,
+      segnalazione_id: segnalazione.rows[0].id,
+      messaggi: messaggi.rows
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+router.post('/:id/segnalazione/messaggi', verificaToken, async (req, res) => {
+  const testo = req.body.testo?.toString().trim();
+  if (!testo) {
+    return res.status(400).json({ errore: 'Scrivi un messaggio' });
+  }
+
+  try {
+    const consegna = await pool.query(`SELECT * FROM consegne WHERE id = $1`, [req.params.id]);
+    if (consegna.rows.length === 0) {
+      return res.status(404).json({ errore: 'Consegna non trovata' });
+    }
+    const c = consegna.rows[0];
+    if (c.mittente_id !== req.utente.id && c.conducente_id !== req.utente.id) {
+      return res.status(403).json({ errore: 'Non hai accesso a questa consegna' });
+    }
+
+    const segnalazione = await pool.query(
+      `SELECT id FROM segnalazioni_smarrimento
+       WHERE consegna_id = $1 AND stato = 'aperta'
+       ORDER BY creata_il DESC LIMIT 1`,
+      [req.params.id]
+    );
+    if (segnalazione.rows.length === 0) {
+      return res.status(400).json({ errore: 'Nessuna segnalazione aperta per questa consegna' });
+    }
+
+    const risultato = await pool.query(
+      `INSERT INTO messaggi_smarrimento (segnalazione_id, autore_id, testo)
+       VALUES ($1, $2, $3)
+       RETURNING id, testo, creato_il, autore_id`,
+      [segnalazione.rows[0].id, req.utente.id, testo]
+    );
+
+    res.status(201).json({ messaggio: risultato.rows[0] });
   } catch (err) {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });
@@ -399,11 +622,22 @@ router.get('/mie', verificaToken, async (req, res) => {
               cd.valutazione_media AS valutazione_conducente_media,
               cd.verificato AS conducente_verificato,
               cd.patente_verificata, cd.assicurazione_verificata,
-              cd.casco_passeggero_disponibile, cd.cuffia_igienica_disponibile
+              cd.casco_passeggero_disponibile, cd.cuffia_igienica_disponibile,
+              -- Ultima segnalazione di smarrimento per questa consegna (se
+              -- esiste), così l'app può mostrare lo stato senza una seconda
+              -- chiamata.
+              s.stato AS segnalazione_smarrimento_stato,
+              s.note_risoluzione AS segnalazione_smarrimento_note
        FROM consegne c
        JOIN users m ON c.mittente_id = m.id
        LEFT JOIN users co ON c.conducente_id = co.id
        LEFT JOIN conducenti cd ON c.conducente_id = cd.user_id
+       LEFT JOIN LATERAL (
+         SELECT stato, note_risoluzione FROM segnalazioni_smarrimento
+         WHERE consegna_id = c.id
+         ORDER BY creata_il DESC
+         LIMIT 1
+       ) s ON true
        WHERE c.mittente_id = $1 OR c.conducente_id = $1
        ORDER BY c.creata_il DESC
        LIMIT 20`,

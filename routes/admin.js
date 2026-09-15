@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../database');
+const stripe = require('../utils/stripe');
 
 // ================================
 // AREA AMMINISTRAZIONE (verifica documenti conducenti)
@@ -78,6 +79,94 @@ router.put('/conducenti/:id/verifica', verificaSegretoAdmin, async (req, res) =>
     }
 
     res.json({ messaggio: 'Bollino aggiornato', ...risultato.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// SEGNALAZIONI DI PACCHI SMARRITI
+// ================================
+// Elenco delle segnalazioni aperte, per decidere caso per caso (mai in modo
+// automatico) se rimborsare il mittente.
+router.get('/segnalazioni-smarrimento', verificaSegretoAdmin, async (req, res) => {
+  try {
+    const risultato = await pool.query(
+      `SELECT s.*,
+              c.descrizione_oggetto, c.categoria, c.ritiro_indirizzo, c.consegna_indirizzo,
+              c.rimborso_calcolato, c.stato AS stato_consegna,
+              m.nome AS nome_mittente, m.cognome AS cognome_mittente, m.email AS email_mittente,
+              co.nome AS nome_conducente, co.cognome AS cognome_conducente,
+              p.stripe_payment_id, p.stato AS stato_pagamento
+       FROM segnalazioni_smarrimento s
+       JOIN consegne c ON s.consegna_id = c.id
+       JOIN users m ON s.mittente_id = m.id
+       LEFT JOIN users co ON c.conducente_id = co.id
+       LEFT JOIN pagamenti p ON p.consegna_id = c.id
+       WHERE s.stato = 'aperta'
+       ORDER BY s.creata_il ASC`
+    );
+    res.json({ segnalazioni: risultato.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// Chiude una segnalazione. Se rimborsa=true e la consegna è stata pagata
+// con carta, rimborsiamo il mittente su Stripe: con reverse_transfer:true
+// Stripe recupera automaticamente anche la parte già accreditata al
+// conducente (se aveva già collegato Stripe Connect).
+router.put('/segnalazioni-smarrimento/:id/risolvi', verificaSegretoAdmin, async (req, res) => {
+  const rimborsa = req.body.rimborsa === true;
+  const note = req.body.note?.toString().trim() || null;
+
+  try {
+    const segnalazione = await pool.query(
+      `SELECT * FROM segnalazioni_smarrimento WHERE id = $1 AND stato = 'aperta'`,
+      [req.params.id]
+    );
+    if (segnalazione.rows.length === 0) {
+      return res.status(404).json({ errore: 'Segnalazione non trovata o già chiusa' });
+    }
+    const s = segnalazione.rows[0];
+
+    let esitoRimborso = null;
+    if (rimborsa) {
+      const pagamento = await pool.query(
+        `SELECT * FROM pagamenti WHERE consegna_id = $1 AND stato = 'completato' LIMIT 1`,
+        [s.consegna_id]
+      );
+      if (pagamento.rows.length === 0 || !pagamento.rows[0].stripe_payment_id) {
+        return res.status(400).json({
+          errore: 'Nessun pagamento riuscito trovato per questa consegna: rimborso non possibile da qui'
+        });
+      }
+      try {
+        await stripe.refunds.create({
+          payment_intent: pagamento.rows[0].stripe_payment_id,
+          reverse_transfer: true
+        });
+        await pool.query(`UPDATE pagamenti SET stato = 'rimborsato' WHERE id = $1`, [pagamento.rows[0].id]);
+        esitoRimborso = 'rimborsato';
+      } catch (err) {
+        console.error('Errore rimborso Stripe:', err.message);
+        return res.status(500).json({ errore: `Rimborso Stripe non riuscito: ${err.message}` });
+      }
+    } else {
+      await pool.query(`UPDATE pagamenti SET contestato = false WHERE consegna_id = $1`, [s.consegna_id]);
+    }
+
+    const aggiornata = await pool.query(
+      `UPDATE segnalazioni_smarrimento
+       SET stato = $1, note_risoluzione = $2, risolta_il = NOW()
+       WHERE id = $3
+       RETURNING *`,
+      [rimborsa ? 'risolta_rimborsata' : 'risolta_senza_rimborso', note, req.params.id]
+    );
+
+    res.json({ messaggio: 'Segnalazione chiusa', segnalazione: aggiornata.rows[0], rimborso: esitoRimborso });
   } catch (err) {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });

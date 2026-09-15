@@ -6,6 +6,7 @@ const { pool } = require('../database');
 const { verificaToken } = require('../middleware/auth');
 const { conducenteSospeso, registraVotoConducente } = require('../utils/recensioni');
 const { eseguiAddebito } = require('./payments');
+const { generaRispostaIA } = require('../utils/assistenteIA');
 
 // Foto opzionale dell'oggetto da consegnare: scritta dove server.js indica
 // (app.set('uploadDir', ...)), che su Render punta al Persistent Disk in
@@ -440,8 +441,9 @@ router.put('/:id/consegnata', verificaToken, async (req, res) => {
 // ================================
 // SEGNALA PACCO SMARRITO (mittente)
 // ================================
-// Modulo guidato con poche domande fisse (nessuna IA): raccoglie la
-// segnalazione, ma la decisione se rimborsare resta sempre a chi gestisce
+// Modulo guidato con poche domande fisse: raccoglie la segnalazione, poi
+// l'assistente IA entra in chat per raccogliere altri dettagli (vedi sotto).
+// La decisione se rimborsare resta comunque sempre a chi gestisce
 // l'assistenza (vedi routes/admin.js), mai automatica.
 router.post('/:id/segnala-smarrimento', verificaToken, async (req, res) => {
   const contattatoConducente = req.body.contattato_conducente === true;
@@ -475,10 +477,20 @@ router.post('/:id/segnala-smarrimento', verificaToken, async (req, res) => {
       return res.status(400).json({ errore: 'Hai già una segnalazione aperta per questa consegna' });
     }
 
-    await pool.query(
+    const segnalazioneCreata = await pool.query(
       `INSERT INTO segnalazioni_smarrimento (consegna_id, mittente_id, contattato_conducente, dettagli)
-       VALUES ($1, $2, $3, $4)`,
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
       [req.params.id, req.utente.id, contattatoConducente, dettagli]
+    );
+    const segnalazioneId = segnalazioneCreata.rows[0].id;
+
+    // Il testo scritto nel modulo diventa il primo messaggio della chat,
+    // così la conversazione con l'assistente IA parte da lì.
+    await pool.query(
+      `INSERT INTO messaggi_smarrimento (segnalazione_id, autore_id, autore_tipo, testo)
+       VALUES ($1, $2, 'utente', $3)`,
+      [segnalazioneId, req.utente.id, dettagli]
     );
 
     // Promemoria visibile in amministrazione: non blocca da solo l'accredito
@@ -488,7 +500,12 @@ router.post('/:id/segnala-smarrimento', verificaToken, async (req, res) => {
       [req.params.id]
     );
 
-    res.status(201).json({ messaggio: 'Segnalazione inviata. Ti risponderemo al più presto.' });
+    // L'assistente IA risponde per primo raccogliendo altri dettagli
+    // (best-effort: se fallisce o manca la chiave API, la segnalazione resta
+    // comunque creata correttamente).
+    await generaRispostaIA({ segnalazioneId, consegnaId: req.params.id });
+
+    res.status(201).json({ messaggio: 'Segnalazione inviata. Ti risponderemo al più presto.', segnalazione_id: segnalazioneId });
   } catch (err) {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });
@@ -523,10 +540,12 @@ router.get('/:id/segnalazione/messaggi', verificaToken, async (req, res) => {
       return res.json({ segnalazione_aperta: false, messaggi: [] });
     }
 
+    // LEFT JOIN perché i messaggi dell'assistente IA non hanno un utente
+    // collegato (autore_id è NULL per quelli).
     const messaggi = await pool.query(
-      `SELECT m.id, m.testo, m.creato_il, m.autore_id, u.nome, u.cognome
+      `SELECT m.id, m.testo, m.creato_il, m.autore_id, m.autore_tipo, u.nome, u.cognome
        FROM messaggi_smarrimento m
-       JOIN users u ON m.autore_id = u.id
+       LEFT JOIN users u ON m.autore_id = u.id
        WHERE m.segnalazione_id = $1
        ORDER BY m.creato_il ASC`,
       [segnalazione.rows[0].id]
@@ -570,11 +589,15 @@ router.post('/:id/segnalazione/messaggi', verificaToken, async (req, res) => {
     }
 
     const risultato = await pool.query(
-      `INSERT INTO messaggi_smarrimento (segnalazione_id, autore_id, testo)
-       VALUES ($1, $2, $3)
-       RETURNING id, testo, creato_il, autore_id`,
+      `INSERT INTO messaggi_smarrimento (segnalazione_id, autore_id, autore_tipo, testo)
+       VALUES ($1, $2, 'utente', $3)
+       RETURNING id, testo, creato_il, autore_id, autore_tipo`,
       [segnalazione.rows[0].id, req.utente.id, testo]
     );
+
+    // L'assistente IA risponde subito dopo (best-effort: se non risponde,
+    // il messaggio della persona è comunque salvato correttamente).
+    await generaRispostaIA({ segnalazioneId: segnalazione.rows[0].id, consegnaId: req.params.id });
 
     res.status(201).json({ messaggio: risultato.rows[0] });
   } catch (err) {

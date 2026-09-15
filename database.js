@@ -336,6 +336,27 @@ const initDatabase = async () => {
       -- che il mittente può allegare quando crea la richiesta).
       ALTER TABLE consegne
         ADD COLUMN IF NOT EXISTS foto_ritiro_url VARCHAR(500);
+
+      -- Tipo di veicolo del conducente: oltre allo scooter (l'unico
+      -- previsto finora), ora anche bici (solo piccole consegne, mai
+      -- passaggi persone) e minicar (passaggi e consegne, come lo scooter).
+      -- Di default 'scooter' per non cambiare il comportamento di chi si è
+      -- già registrato prima di questa colonna.
+      ALTER TABLE conducenti
+        ADD COLUMN IF NOT EXISTS tipo_veicolo VARCHAR(20) NOT NULL DEFAULT 'scooter'
+          CHECK (tipo_veicolo IN ('scooter', 'bici', 'minicar'));
+
+      -- La targa non ha senso per una bici: la rendiamo opzionale (resta
+      -- obbligatoria solo lato applicazione/validazione per scooter e
+      -- minicar, che un targa ce l'hanno davvero).
+      ALTER TABLE conducenti ALTER COLUMN targa_moto DROP NOT NULL;
+
+      -- Preferenza del passeggero tra scooter e minicar per un passaggio,
+      -- sullo stesso modello della cilindrata preferita: solo informativa,
+      -- non filtra chi può accettare la richiesta.
+      ALTER TABLE corse
+        ADD COLUMN IF NOT EXISTS veicolo_preferito VARCHAR(20)
+          CHECK (veicolo_preferito IS NULL OR veicolo_preferito IN ('scooter', 'minicar'));
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

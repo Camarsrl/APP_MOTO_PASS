@@ -1,16 +1,16 @@
 const { pool } = require('../database');
 
 // ================================
-// ASSISTENTE IA per le segnalazioni di smarrimento
+// ASSISTENTE IA per le segnalazioni
 // ================================
-// Risponde in automatico nella chat tra mittente e conducente quando è
-// aperta una segnalazione (pacco non arrivato, danneggiato, ritardo,
-// malinteso). Raccoglie i dettagli mancanti e propone i prossimi passi per
-// i casi semplici, ma non decide né promette mai un rimborso: quello resta
-// sempre compito di una persona (vedi routes/admin.js). Per i casi seri
-// (incidenti con feriti, sospette frodi, rimborsi importanti, comportamento
-// minaccioso) smette di rispondere nel merito e segnala che serve un
-// operatore umano.
+// Risponde in automatico nella chat aperta su una segnalazione, sia per le
+// consegne (pacco smarrito, danneggiato...) sia per i passaggi (conducente
+// non arrivato, incidente, problemi di pagamento...). Raccoglie i dettagli
+// mancanti e propone i prossimi passi per i casi semplici, ma non decide né
+// promette mai un rimborso: quello resta sempre compito di una persona
+// (vedi routes/admin.js). Per i casi seri (incidenti, sospette frodi,
+// rimborsi importanti, comportamento minaccioso) smette di rispondere nel
+// merito e segnala che serve un operatore umano.
 //
 // Richiede la variabile d'ambiente ANTHROPIC_API_KEY su Render (mai in
 // chat, va impostata direttamente lì, come già fatto per Stripe). Se manca,
@@ -20,22 +20,36 @@ const { pool } = require('../database');
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODELLO_DEFAULT = 'claude-3-5-haiku-20241022';
 
-const PROMPT_SISTEMA = `Sei l'Assistente Moto Pass, il supporto automatico di primo livello per le segnalazioni sui pacchi consegnati con l'app Moto Pass (passaggi e piccole consegne in scooter/bici/minicar, modello carpooling con rimborso spese, non un corriere commerciale).
+const ETICHETTE_CATEGORIA = {
+  smarrimento: 'Pacco non arrivato / smarrito',
+  danneggiato: 'Pacco arrivato danneggiato',
+  non_arrivato: 'Conducente non si è presentato',
+  incidente: 'Incidente durante un passaggio o una consegna',
+  pagamento: 'Problema con un pagamento'
+};
 
-Quando si apre una segnalazione (pacco non arrivato, danneggiato, in ritardo, malinteso con il conducente):
-- Fai domande brevi e concrete per raccogliere i dettagli mancanti (cosa è successo, quando, se il mittente ha già contattato il conducente, se ci sono foto).
-- Per i casi semplici (piccolo ritardo, malinteso che si chiarisce in chat, informazioni mancanti) rassicura la persona e suggerisci i prossimi passi, ma non puoi decidere né promettere un rimborso: quella decisione spetta sempre a una persona del team Moto Pass.
-- Se la situazione riguarda un incidente con feriti, un sospetto di frode o furto, un importo di rimborso importante, un comportamento minaccioso o violento, o qualunque cosa che ti sembri seria o che non sai gestire, smetti di indagare nel merito: rispondi con gentilezza dicendo che stai passando la segnalazione a un operatore del team, che la contatterà al più presto.
+const PROMPT_SISTEMA = `Sei l'Assistente Moto Pass, il supporto automatico di primo livello per le segnalazioni sull'app Moto Pass (passaggi e piccole consegne in scooter/bici/minicar, modello carpooling con rimborso spese, non un corriere o taxi commerciale). Rispondi in una chat legata a UNA segnalazione precisa, tra le persone coinvolte (passeggero/mittente e conducente) più te.
+
+Ogni segnalazione ha una categoria, che ti viene indicata nel contesto:
+- "Pacco non arrivato / smarrito" o "Pacco arrivato danneggiato": fai domande brevi per capire cosa è successo (quando, dove, se il mittente ha già contattato il conducente, se ci sono foto), poi rassicura e spiega i prossimi passi. Non puoi decidere né promettere un rimborso.
+- "Conducente non si è presentato": chiedi da quanto tempo aspetta e se ha provato a contattare il conducente; rassicura che la cosa verrà verificata.
+- "Problema con un pagamento": chiedi quale addebito o importo non torna e quando è avvenuto; non puoi correggere o rimborsare nulla tu stesso, solo raccogliere i dettagli per chi si occupa dei pagamenti.
+- "Incidente durante un passaggio o una consegna": qui la priorità è la sicurezza delle persone, non la ricostruzione dei fatti. Rispondi con UN messaggio breve e premuroso (chiedi se tutti stanno bene, ricorda di chiamare il 112 se serve soccorso), poi smetti subito di indagare nel merito: imposta sempre richiede_operatore a true fin dal primo messaggio per questa categoria, senza eccezioni.
+
+Regole generali:
+- Per qualunque categoria, se emerge un sospetto di frode o furto, un importo importante, un comportamento minaccioso o violento, o qualcosa che non sai gestire, smetti di indagare e passa la segnalazione a un operatore (richiede_operatore: true), spiegandolo con gentilezza.
+- Non decidere né promettere mai un rimborso: quella scelta spetta sempre a una persona del team Moto Pass.
 - Tono cordiale, diretto, in italiano, massimo 4-5 righe per messaggio: è una chat da smartphone, non un'email.
 
 Rispondi SEMPRE e SOLO con un oggetto JSON valido, senza nessun testo fuori dal JSON e senza blocchi \`\`\`, con questa forma esatta:
 {"messaggio": "<il messaggio da mostrare in chat>", "richiede_operatore": <true o false>, "riepilogo": "<una riga che riassume la situazione per chi lavora in amministrazione>"}`;
 
 // Genera (se possibile) la prossima risposta dell'assistente per una
-// segnalazione e la salva in chat. Non lancia mai errori verso il
-// chiamante: un problema con l'IA non deve mai bloccare l'invio del
-// messaggio della persona né la creazione della segnalazione.
-async function generaRispostaIA({ segnalazioneId, consegnaId }) {
+// segnalazione e la salva in chat. Basta l'id della segnalazione: consegna
+// o corsa collegata (mai entrambe) si ricavano da lì. Non lancia mai errori
+// verso il chiamante: un problema con l'IA non deve mai bloccare l'invio
+// del messaggio della persona né la creazione della segnalazione.
+async function generaRispostaIA({ segnalazioneId }) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.warn('ANTHROPIC_API_KEY non impostata: assistente IA disattivato');
@@ -54,12 +68,33 @@ async function generaRispostaIA({ segnalazioneId, consegnaId }) {
     // interviene più: evitiamo che il bot parli sopra un operatore reale.
     if (s.richiede_operatore) return null;
 
-    const consegnaRes = await pool.query(
-      `SELECT descrizione_oggetto, categoria, ritiro_indirizzo, consegna_indirizzo, rimborso_calcolato
-       FROM consegne WHERE id = $1`,
-      [consegnaId]
-    );
-    const c = consegnaRes.rows[0] || {};
+    let contestoRiferimento;
+    if (s.consegna_id != null) {
+      const consegnaRes = await pool.query(
+        `SELECT descrizione_oggetto, categoria, ritiro_indirizzo, consegna_indirizzo, rimborso_calcolato
+         FROM consegne WHERE id = $1`,
+        [s.consegna_id]
+      );
+      const c = consegnaRes.rows[0] || {};
+      contestoRiferimento = `Riferimento: una consegna.
+- Oggetto: ${c.descrizione_oggetto || 'n/d'} (categoria oggetto: ${c.categoria || 'n/d'})
+- Ritiro: ${c.ritiro_indirizzo || 'n/d'}
+- Consegna: ${c.consegna_indirizzo || 'n/d'}
+- Eventuale rimborso calcolato dal sistema: ${c.rimborso_calcolato != null ? c.rimborso_calcolato + ' euro' : 'n/d'}`;
+    } else if (s.corsa_id != null) {
+      const corsaRes = await pool.query(
+        `SELECT partenza_indirizzo, destinazione_indirizzo, rimborso_calcolato
+         FROM corse WHERE id = $1`,
+        [s.corsa_id]
+      );
+      const c = corsaRes.rows[0] || {};
+      contestoRiferimento = `Riferimento: un passaggio.
+- Partenza: ${c.partenza_indirizzo || 'n/d'}
+- Destinazione: ${c.destinazione_indirizzo || 'n/d'}
+- Eventuale rimborso calcolato dal sistema: ${c.rimborso_calcolato != null ? c.rimborso_calcolato + ' euro' : 'n/d'}`;
+    } else {
+      contestoRiferimento = 'Riferimento: non disponibile.';
+    }
 
     const storicoRes = await pool.query(
       `SELECT autore_tipo, testo FROM messaggi_smarrimento
@@ -67,12 +102,9 @@ async function generaRispostaIA({ segnalazioneId, consegnaId }) {
       [segnalazioneId]
     );
 
-    const contesto = `Dettagli della consegna:
-- Oggetto: ${c.descrizione_oggetto || 'n/d'} (categoria: ${c.categoria || 'n/d'})
-- Ritiro: ${c.ritiro_indirizzo || 'n/d'}
-- Consegna: ${c.consegna_indirizzo || 'n/d'}
-- Eventuale rimborso calcolato dal sistema: ${c.rimborso_calcolato != null ? c.rimborso_calcolato + ' euro' : 'n/d'}
-- Il mittente ha già contattato il conducente: ${s.contattato_conducente ? 'sì' : 'no'}
+    const contesto = `Categoria della segnalazione: ${ETICHETTE_CATEGORIA[s.categoria] || s.categoria}
+${contestoRiferimento}
+- La persona ha già contattato il conducente: ${s.contattato_conducente ? 'sì' : 'no'}
 - Dettagli iniziali della segnalazione: ${s.dettagli || 'n/d'}`;
 
     const messaggiClaude = [
@@ -132,6 +164,11 @@ async function generaRispostaIA({ segnalazioneId, consegnaId }) {
       };
     }
 
+    // Per un incidente l'IA non decide mai di continuare da sola, qualunque
+    // cosa dica il modello: è una garanzia scritta nel codice, non solo nel
+    // prompt.
+    const richiedeOperatore = s.categoria === 'incidente' ? true : parsed.richiede_operatore === true;
+
     const messaggioIA = (parsed.messaggio || '').toString().trim();
     if (!messaggioIA) return null;
 
@@ -142,7 +179,7 @@ async function generaRispostaIA({ segnalazioneId, consegnaId }) {
       [segnalazioneId, messaggioIA]
     );
 
-    if (parsed.richiede_operatore === true) {
+    if (richiedeOperatore) {
       await pool.query(
         `UPDATE segnalazioni_smarrimento SET richiede_operatore = true, riepilogo_ia = $1 WHERE id = $2`,
         [(parsed.riepilogo || '').toString().trim() || null, segnalazioneId]
@@ -161,4 +198,4 @@ async function generaRispostaIA({ segnalazioneId, consegnaId }) {
   }
 }
 
-module.exports = { generaRispostaIA };
+module.exports = { generaRispostaIA, ETICHETTE_CATEGORIA };

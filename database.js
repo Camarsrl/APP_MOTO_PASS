@@ -391,6 +391,24 @@ const initDatabase = async () => {
         ADD COLUMN IF NOT EXISTS posizione_conducente_lng DOUBLE PRECISION;
       ALTER TABLE consegne
         ADD COLUMN IF NOT EXISTS posizione_aggiornata_il TIMESTAMP;
+
+      -- ================================
+      -- SEGNALAZIONI: estese oltre lo smarrimento pacchi
+      -- ================================
+      -- La tabella nasce per le sole segnalazioni di smarrimento pacco
+      -- (da cui il nome, rimasto per non dover rinominare tabelle già in
+      -- produzione), ma ora copre più categorie di problema e anche i
+      -- passaggi, non solo le consegne: una riga si riferisce a UNA
+      -- consegna oppure a UNA corsa, mai entrambe (lo garantisce
+      -- l'applicazione, non un vincolo qui). "corsa_id" è il nuovo
+      -- collegamento; "consegna_id" diventa opzionale per farci stare
+      -- anche le segnalazioni sui passaggi.
+      ALTER TABLE segnalazioni_smarrimento ALTER COLUMN consegna_id DROP NOT NULL;
+      ALTER TABLE segnalazioni_smarrimento
+        ADD COLUMN IF NOT EXISTS corsa_id INTEGER REFERENCES corse(id);
+      ALTER TABLE segnalazioni_smarrimento
+        ADD COLUMN IF NOT EXISTS categoria VARCHAR(30) NOT NULL DEFAULT 'smarrimento'
+          CHECK (categoria IN ('smarrimento', 'danneggiato', 'non_arrivato', 'incidente', 'pagamento'));
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

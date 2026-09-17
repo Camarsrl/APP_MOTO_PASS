@@ -380,6 +380,17 @@ const initDatabase = async () => {
         ADD COLUMN IF NOT EXISTS richiede_operatore BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE segnalazioni_smarrimento
         ADD COLUMN IF NOT EXISTS riepilogo_ia TEXT;
+
+      -- Posizione GPS del conducente durante una consegna in corso,
+      -- aggiornata periodicamente dall'app finché la consegna è "accettata"
+      -- o "ritirata": permette al mittente di seguire il pacco in tempo
+      -- reale da "Le mie consegne" (vedi routes/consegne.js).
+      ALTER TABLE consegne
+        ADD COLUMN IF NOT EXISTS posizione_conducente_lat DOUBLE PRECISION;
+      ALTER TABLE consegne
+        ADD COLUMN IF NOT EXISTS posizione_conducente_lng DOUBLE PRECISION;
+      ALTER TABLE consegne
+        ADD COLUMN IF NOT EXISTS posizione_aggiornata_il TIMESTAMP;
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

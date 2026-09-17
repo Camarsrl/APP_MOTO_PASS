@@ -506,16 +506,28 @@ router.get('/:id/posizione', verificaToken, async (req, res) => {
   }
 });
 
+// Categorie di segnalazione utilizzabili per una consegna (uno smarrimento o
+// un danno riguardano solo un pacco; "non_arrivato" non ha senso qui, è per
+// i passaggi — vedi routes/rides.js).
+const CATEGORIE_SEGNALAZIONE_CONSEGNA = ['smarrimento', 'danneggiato', 'incidente', 'pagamento'];
+
 // ================================
-// SEGNALA PACCO SMARRITO (mittente)
+// SEGNALA UN PROBLEMA SU UNA CONSEGNA (mittente)
 // ================================
 // Modulo guidato con poche domande fisse: raccoglie la segnalazione, poi
 // l'assistente IA entra in chat per raccogliere altri dettagli (vedi sotto).
-// La decisione se rimborsare resta comunque sempre a chi gestisce
-// l'assistenza (vedi routes/admin.js), mai automatica.
+// Copre non solo lo smarrimento ma anche danni, incidenti e problemi di
+// pagamento (parametro "categoria", facoltativo, default "smarrimento" per
+// compatibilità con l'app già installata). La decisione se rimborsare resta
+// comunque sempre a chi gestisce l'assistenza (vedi routes/admin.js), mai
+// automatica.
 router.post('/:id/segnala-smarrimento', verificaToken, async (req, res) => {
   const contattatoConducente = req.body.contattato_conducente === true;
   const dettagli = req.body.dettagli?.toString().trim();
+  const categoriaRichiesta = req.body.categoria?.toString().trim();
+  const categoria = CATEGORIE_SEGNALAZIONE_CONSEGNA.includes(categoriaRichiesta)
+    ? categoriaRichiesta
+    : 'smarrimento';
 
   if (!dettagli) {
     return res.status(400).json({ errore: 'Descrivi cosa è successo' });
@@ -531,9 +543,11 @@ router.post('/:id/segnala-smarrimento', verificaToken, async (req, res) => {
     }
 
     const c = consegna.rows[0];
-    if (!['ritirata', 'consegnata'].includes(c.stato)) {
+    // "accettata" è inclusa per permettere di segnalare subito un incidente,
+    // senza dover aspettare che il pacco sia stato ritirato.
+    if (!['accettata', 'ritirata', 'consegnata'].includes(c.stato)) {
       return res.status(400).json({
-        errore: 'Puoi segnalare uno smarrimento solo dopo che il pacco è stato ritirato'
+        errore: 'Puoi segnalare un problema solo dopo che la consegna è stata accettata'
       });
     }
 
@@ -546,10 +560,10 @@ router.post('/:id/segnala-smarrimento', verificaToken, async (req, res) => {
     }
 
     const segnalazioneCreata = await pool.query(
-      `INSERT INTO segnalazioni_smarrimento (consegna_id, mittente_id, contattato_conducente, dettagli)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO segnalazioni_smarrimento (consegna_id, mittente_id, contattato_conducente, dettagli, categoria)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      [req.params.id, req.utente.id, contattatoConducente, dettagli]
+      [req.params.id, req.utente.id, contattatoConducente, dettagli, categoria]
     );
     const segnalazioneId = segnalazioneCreata.rows[0].id;
 
@@ -571,7 +585,7 @@ router.post('/:id/segnala-smarrimento', verificaToken, async (req, res) => {
     // L'assistente IA risponde per primo raccogliendo altri dettagli
     // (best-effort: se fallisce o manca la chiave API, la segnalazione resta
     // comunque creata correttamente).
-    await generaRispostaIA({ segnalazioneId, consegnaId: req.params.id });
+    await generaRispostaIA({ segnalazioneId });
 
     res.status(201).json({ messaggio: 'Segnalazione inviata. Ti risponderemo al più presto.', segnalazione_id: segnalazioneId });
   } catch (err) {
@@ -665,7 +679,7 @@ router.post('/:id/segnalazione/messaggi', verificaToken, async (req, res) => {
 
     // L'assistente IA risponde subito dopo (best-effort: se non risponde,
     // il messaggio della persona è comunque salvato correttamente).
-    await generaRispostaIA({ segnalazioneId: segnalazione.rows[0].id, consegnaId: req.params.id });
+    await generaRispostaIA({ segnalazioneId: segnalazione.rows[0].id });
 
     res.status(201).json({ messaggio: risultato.rows[0] });
   } catch (err) {

@@ -4,6 +4,12 @@ const { pool } = require('../database');
 const { verificaToken } = require('../middleware/auth');
 const { conducenteSospeso, registraVotoConducente } = require('../utils/recensioni');
 const { eseguiAddebito } = require('./payments');
+const { generaRispostaIA } = require('../utils/assistenteIA');
+
+// Categorie di segnalazione utilizzabili per un passaggio ("smarrimento" e
+// "danneggiato" riguardano solo un pacco: non hanno senso qui, sono per le
+// consegne — vedi routes/consegne.js).
+const CATEGORIE_SEGNALAZIONE_CORSA = ['non_arrivato', 'incidente', 'pagamento'];
 
 // Tariffa pagata dal passeggero: €1 al km, con una spesa minima di €4
 // a corsa (anche per tragitti brevissimi).
@@ -177,10 +183,20 @@ router.get('/storico', verificaToken, async (req, res) => {
     const risultato = await pool.query(
       `SELECT c.*,
               p.nome AS nome_passeggero, p.cognome AS cognome_passeggero, p.foto_profilo AS foto_passeggero,
-              co.nome AS nome_conducente, co.cognome AS cognome_conducente, co.foto_profilo AS foto_conducente
+              co.nome AS nome_conducente, co.cognome AS cognome_conducente, co.foto_profilo AS foto_conducente,
+              -- Ultima segnalazione per questo passaggio (se esiste), così
+              -- l'app può mostrarne lo stato senza una seconda chiamata.
+              s.stato AS segnalazione_stato,
+              s.note_risoluzione AS segnalazione_note
        FROM corse c
        LEFT JOIN users p ON c.passeggero_id = p.id
        LEFT JOIN users co ON c.conducente_id = co.id
+       LEFT JOIN LATERAL (
+         SELECT stato, note_risoluzione FROM segnalazioni_smarrimento
+         WHERE corsa_id = c.id
+         ORDER BY creata_il DESC
+         LIMIT 1
+       ) s ON true
        WHERE c.passeggero_id = $1 OR c.conducente_id = $1
        ORDER BY c.creata_il DESC
        LIMIT 20`,
@@ -617,6 +633,182 @@ router.put('/posizione', verificaToken, async (req, res) => {
     );
 
     res.json({ messaggio: 'Posizione aggiornata' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// SEGNALA UN PROBLEMA SU UN PASSAGGIO (passeggero o conducente)
+// ================================
+// Stesso meccanismo delle segnalazioni sulle consegne (stessa tabella,
+// stessa chat, stesso assistente IA): qui copre "il conducente non si è
+// presentato", un incidente durante il passaggio o un problema con
+// l'addebito. La decisione se rimborsare resta comunque sempre a chi
+// gestisce l'assistenza (vedi routes/admin.js), mai automatica.
+router.post('/:id/segnala-problema', verificaToken, async (req, res) => {
+  const dettagli = req.body.dettagli?.toString().trim();
+  const categoria = req.body.categoria?.toString().trim();
+
+  if (!dettagli) {
+    return res.status(400).json({ errore: 'Descrivi cosa è successo' });
+  }
+  if (!CATEGORIE_SEGNALAZIONE_CORSA.includes(categoria)) {
+    return res.status(400).json({ errore: 'Categoria non valida' });
+  }
+
+  try {
+    const corsa = await pool.query(`SELECT * FROM corse WHERE id = $1`, [req.params.id]);
+    if (corsa.rows.length === 0) {
+      return res.status(404).json({ errore: 'Corsa non trovata' });
+    }
+    const c = corsa.rows[0];
+    if (c.passeggero_id !== req.utente.id && c.conducente_id !== req.utente.id) {
+      return res.status(403).json({ errore: 'Non hai accesso a questa corsa' });
+    }
+    // "accettata" è inclusa per permettere di segnalare subito che il
+    // conducente non si è presentato, o un incidente, senza dover aspettare
+    // che il passaggio sia terminato.
+    if (!['accettata', 'in_corso', 'completata'].includes(c.stato)) {
+      return res.status(400).json({
+        errore: 'Puoi segnalare un problema solo dopo che un conducente ha accettato la corsa'
+      });
+    }
+
+    const giaAperta = await pool.query(
+      `SELECT id FROM segnalazioni_smarrimento WHERE corsa_id = $1 AND stato = 'aperta'`,
+      [req.params.id]
+    );
+    if (giaAperta.rows.length > 0) {
+      return res.status(400).json({ errore: 'Hai già una segnalazione aperta per questo passaggio' });
+    }
+
+    const segnalazioneCreata = await pool.query(
+      `INSERT INTO segnalazioni_smarrimento (corsa_id, mittente_id, dettagli, categoria)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [req.params.id, req.utente.id, dettagli, categoria]
+    );
+    const segnalazioneId = segnalazioneCreata.rows[0].id;
+
+    // Il testo scritto nel modulo diventa il primo messaggio della chat,
+    // così la conversazione con l'assistente IA parte da lì.
+    await pool.query(
+      `INSERT INTO messaggi_smarrimento (segnalazione_id, autore_id, autore_tipo, testo)
+       VALUES ($1, $2, 'utente', $3)`,
+      [segnalazioneId, req.utente.id, dettagli]
+    );
+
+    // Promemoria visibile in amministrazione, come per le consegne: non
+    // blocca da solo l'addebito già avviato su Stripe, ma segnala il
+    // pagamento come "in contestazione".
+    await pool.query(
+      `UPDATE pagamenti SET contestato = true WHERE corsa_id = $1`,
+      [req.params.id]
+    );
+
+    // L'assistente IA risponde per primo raccogliendo altri dettagli
+    // (best-effort: se fallisce o manca la chiave API, la segnalazione resta
+    // comunque creata correttamente). Per un incidente, generaRispostaIA
+    // forza comunque il passaggio a un operatore fin dal primo messaggio.
+    await generaRispostaIA({ segnalazioneId });
+
+    res.status(201).json({ messaggio: 'Segnalazione inviata. Ti risponderemo al più presto.', segnalazione_id: segnalazioneId });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
+// CHAT SULLA SEGNALAZIONE DI UN PASSAGGIO (passeggero e conducente)
+// ================================
+// Esiste solo mentre una segnalazione è aperta: serve a chiarire subito il
+// problema tra le due persone coinvolte, non è una messaggistica generale
+// dell'app. Nessuna notifica push: l'app controlla i nuovi messaggi mentre
+// questa schermata è aperta.
+router.get('/:id/segnalazione/messaggi', verificaToken, async (req, res) => {
+  try {
+    const corsa = await pool.query(`SELECT * FROM corse WHERE id = $1`, [req.params.id]);
+    if (corsa.rows.length === 0) {
+      return res.status(404).json({ errore: 'Corsa non trovata' });
+    }
+    const c = corsa.rows[0];
+    if (c.passeggero_id !== req.utente.id && c.conducente_id !== req.utente.id) {
+      return res.status(403).json({ errore: 'Non hai accesso a questa corsa' });
+    }
+
+    const segnalazione = await pool.query(
+      `SELECT id FROM segnalazioni_smarrimento
+       WHERE corsa_id = $1 AND stato = 'aperta'
+       ORDER BY creata_il DESC LIMIT 1`,
+      [req.params.id]
+    );
+    if (segnalazione.rows.length === 0) {
+      return res.json({ segnalazione_aperta: false, messaggi: [] });
+    }
+
+    // LEFT JOIN perché i messaggi dell'assistente IA non hanno un utente
+    // collegato (autore_id è NULL per quelli).
+    const messaggi = await pool.query(
+      `SELECT m.id, m.testo, m.creato_il, m.autore_id, m.autore_tipo, u.nome, u.cognome
+       FROM messaggi_smarrimento m
+       LEFT JOIN users u ON m.autore_id = u.id
+       WHERE m.segnalazione_id = $1
+       ORDER BY m.creato_il ASC`,
+      [segnalazione.rows[0].id]
+    );
+
+    res.json({
+      segnalazione_aperta: true,
+      segnalazione_id: segnalazione.rows[0].id,
+      messaggi: messaggi.rows
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+router.post('/:id/segnalazione/messaggi', verificaToken, async (req, res) => {
+  const testo = req.body.testo?.toString().trim();
+  if (!testo) {
+    return res.status(400).json({ errore: 'Scrivi un messaggio' });
+  }
+
+  try {
+    const corsa = await pool.query(`SELECT * FROM corse WHERE id = $1`, [req.params.id]);
+    if (corsa.rows.length === 0) {
+      return res.status(404).json({ errore: 'Corsa non trovata' });
+    }
+    const c = corsa.rows[0];
+    if (c.passeggero_id !== req.utente.id && c.conducente_id !== req.utente.id) {
+      return res.status(403).json({ errore: 'Non hai accesso a questa corsa' });
+    }
+
+    const segnalazione = await pool.query(
+      `SELECT id FROM segnalazioni_smarrimento
+       WHERE corsa_id = $1 AND stato = 'aperta'
+       ORDER BY creata_il DESC LIMIT 1`,
+      [req.params.id]
+    );
+    if (segnalazione.rows.length === 0) {
+      return res.status(400).json({ errore: 'Nessuna segnalazione aperta per questo passaggio' });
+    }
+
+    const risultato = await pool.query(
+      `INSERT INTO messaggi_smarrimento (segnalazione_id, autore_id, autore_tipo, testo)
+       VALUES ($1, $2, 'utente', $3)
+       RETURNING id, testo, creato_il, autore_id, autore_tipo`,
+      [segnalazione.rows[0].id, req.utente.id, testo]
+    );
+
+    // L'assistente IA risponde subito dopo (best-effort: se non risponde, il
+    // messaggio della persona è comunque salvato correttamente).
+    await generaRispostaIA({ segnalazioneId: segnalazione.rows[0].id });
+
+    res.status(201).json({ messaggio: risultato.rows[0] });
   } catch (err) {
     console.error(err);
     res.status(500).json({ errore: 'Errore del server' });

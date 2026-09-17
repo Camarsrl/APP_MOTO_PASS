@@ -439,6 +439,74 @@ router.put('/:id/consegnata', verificaToken, async (req, res) => {
 });
 
 // ================================
+// POSIZIONE GPS DEL CONDUCENTE (tracciamento in tempo reale del pacco)
+// ================================
+// Mentre la consegna è "accettata" o "ritirata" (in corso), l'app del
+// conducente invia periodicamente la sua posizione: il mittente può così
+// seguire il pacco in tempo reale da "Le mie consegne", senza dover
+// riusare l'elenco completo di /mie (che porta anche foto e testi che qui
+// non servono).
+router.put('/:id/posizione', verificaToken, async (req, res) => {
+  const lat = parseFloat(req.body.lat);
+  const lng = parseFloat(req.body.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return res.status(400).json({ errore: 'Posizione non valida' });
+  }
+
+  try {
+    const consegna = await pool.query(`SELECT * FROM consegne WHERE id = $1`, [req.params.id]);
+    if (consegna.rows.length === 0) {
+      return res.status(404).json({ errore: 'Consegna non trovata' });
+    }
+    const c = consegna.rows[0];
+    if (c.conducente_id !== req.utente.id) {
+      return res.status(403).json({ errore: 'Non sei il conducente di questa consegna' });
+    }
+    if (!['accettata', 'ritirata'].includes(c.stato)) {
+      // Non è un errore da mostrare: l'app smette semplicemente di inviare
+      // la posizione quando la consegna non è più in corso.
+      return res.status(400).json({ errore: 'La consegna non è in corso' });
+    }
+
+    await pool.query(
+      `UPDATE consegne
+       SET posizione_conducente_lat = $1, posizione_conducente_lng = $2, posizione_aggiornata_il = NOW()
+       WHERE id = $3`,
+      [lat, lng, req.params.id]
+    );
+
+    res.json({ messaggio: 'Posizione aggiornata' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+router.get('/:id/posizione', verificaToken, async (req, res) => {
+  try {
+    const consegna = await pool.query(
+      `SELECT mittente_id, conducente_id, stato,
+              ritiro_lat, ritiro_lng, consegna_lat, consegna_lng,
+              posizione_conducente_lat, posizione_conducente_lng, posizione_aggiornata_il
+       FROM consegne WHERE id = $1`,
+      [req.params.id]
+    );
+    if (consegna.rows.length === 0) {
+      return res.status(404).json({ errore: 'Consegna non trovata' });
+    }
+    const c = consegna.rows[0];
+    if (c.mittente_id !== req.utente.id && c.conducente_id !== req.utente.id) {
+      return res.status(403).json({ errore: 'Non hai accesso a questa consegna' });
+    }
+
+    res.json({ posizione: c });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ errore: 'Errore del server' });
+  }
+});
+
+// ================================
 // SEGNALA PACCO SMARRITO (mittente)
 // ================================
 // Modulo guidato con poche domande fisse: raccoglie la segnalazione, poi

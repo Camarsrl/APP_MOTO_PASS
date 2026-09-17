@@ -86,27 +86,37 @@ router.put('/conducenti/:id/verifica', verificaSegretoAdmin, async (req, res) =>
 });
 
 // ================================
-// SEGNALAZIONI DI PACCHI SMARRITI
+// SEGNALAZIONI (consegne e passaggi)
 // ================================
 // Elenco delle segnalazioni aperte, per decidere caso per caso (mai in modo
-// automatico) se rimborsare il mittente. richiede_operatore e riepilogo_ia
-// (dentro s.*) sono impostati dall'assistente IA quando la situazione va
-// oltre quello che può gestire da solo: quelle segnalazioni vengono per
-// prime, così chi fa assistenza le vede subito.
+// automatico) se rimborsare la persona che ha segnalato. richiede_operatore
+// e riepilogo_ia (dentro s.*) sono impostati dall'assistente IA quando la
+// situazione va oltre quello che può gestire da solo: quelle segnalazioni
+// vengono per prime, così chi fa assistenza le vede subito. La tabella
+// "segnalazioni_smarrimento" nasce per i soli pacchi smarriti (da cui il
+// nome) ma ora copre più categorie di problema e anche i passaggi: una riga
+// fa riferimento a UNA consegna oppure a UNA corsa, mai entrambe, quindi qui
+// sotto sono in LEFT JOIN e per ognuna solo uno dei due blocchi di colonne
+// (consegna_* / corsa_*) sarà valorizzato.
 router.get('/segnalazioni-smarrimento', verificaSegretoAdmin, async (req, res) => {
   try {
     const risultato = await pool.query(
       `SELECT s.*,
-              c.descrizione_oggetto, c.categoria, c.ritiro_indirizzo, c.consegna_indirizzo,
-              c.rimborso_calcolato, c.stato AS stato_consegna,
+              c.descrizione_oggetto, c.categoria AS categoria_oggetto,
+              c.ritiro_indirizzo, c.consegna_indirizzo, c.stato AS stato_consegna,
+              r.partenza_indirizzo, r.destinazione_indirizzo, r.stato AS stato_corsa,
+              COALESCE(c.rimborso_calcolato, r.rimborso_calcolato) AS rimborso_calcolato,
               m.nome AS nome_mittente, m.cognome AS cognome_mittente, m.email AS email_mittente,
               co.nome AS nome_conducente, co.cognome AS cognome_conducente,
               p.stripe_payment_id, p.stato AS stato_pagamento
        FROM segnalazioni_smarrimento s
-       JOIN consegne c ON s.consegna_id = c.id
+       LEFT JOIN consegne c ON s.consegna_id = c.id
+       LEFT JOIN corse r ON s.corsa_id = r.id
        JOIN users m ON s.mittente_id = m.id
-       LEFT JOIN users co ON c.conducente_id = co.id
-       LEFT JOIN pagamenti p ON p.consegna_id = c.id
+       LEFT JOIN users co ON COALESCE(c.conducente_id, r.conducente_id) = co.id
+       LEFT JOIN pagamenti p
+         ON (s.consegna_id IS NOT NULL AND p.consegna_id = s.consegna_id)
+         OR (s.corsa_id IS NOT NULL AND p.corsa_id = s.corsa_id)
        WHERE s.stato = 'aperta'
        ORDER BY s.richiede_operatore DESC, s.creata_il ASC`
     );
@@ -135,15 +145,21 @@ router.put('/segnalazioni-smarrimento/:id/risolvi', verificaSegretoAdmin, async 
     }
     const s = segnalazione.rows[0];
 
+    // Una segnalazione fa riferimento a UNA consegna oppure a UNA corsa, mai
+    // entrambe: qui si sceglie con quale colonna cercare il pagamento
+    // collegato, qualunque sia il caso.
+    const campoRiferimento = s.consegna_id != null ? 'consegna_id' : 'corsa_id';
+    const idRiferimento = s.consegna_id != null ? s.consegna_id : s.corsa_id;
+
     let esitoRimborso = null;
     if (rimborsa) {
       const pagamento = await pool.query(
-        `SELECT * FROM pagamenti WHERE consegna_id = $1 AND stato = 'completato' LIMIT 1`,
-        [s.consegna_id]
+        `SELECT * FROM pagamenti WHERE ${campoRiferimento} = $1 AND stato = 'completato' LIMIT 1`,
+        [idRiferimento]
       );
       if (pagamento.rows.length === 0 || !pagamento.rows[0].stripe_payment_id) {
         return res.status(400).json({
-          errore: 'Nessun pagamento riuscito trovato per questa consegna: rimborso non possibile da qui'
+          errore: 'Nessun pagamento riuscito trovato per questo riferimento: rimborso non possibile da qui'
         });
       }
       try {
@@ -158,7 +174,7 @@ router.put('/segnalazioni-smarrimento/:id/risolvi', verificaSegretoAdmin, async 
         return res.status(500).json({ errore: `Rimborso Stripe non riuscito: ${err.message}` });
       }
     } else {
-      await pool.query(`UPDATE pagamenti SET contestato = false WHERE consegna_id = $1`, [s.consegna_id]);
+      await pool.query(`UPDATE pagamenti SET contestato = false WHERE ${campoRiferimento} = $1`, [idRiferimento]);
     }
 
     const aggiornata = await pool.query(

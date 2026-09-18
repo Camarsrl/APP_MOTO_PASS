@@ -4,6 +4,11 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../database');
 
+// Veicoli dedicati alle sole consegne: mai passaggi persone (un monopattino
+// non può legalmente trasportare un passeggero, un cargo bike è pensato per
+// il carico e non per una persona a bordo, una bici nemmeno).
+const VEICOLI_SOLO_CONSEGNE = ['bici', 'cargo_bike', 'monopattino'];
+
 // ================================
 // REGISTRAZIONE PASSEGGERO
 // ================================
@@ -66,10 +71,11 @@ router.post('/registra/conducente', async (req, res) => {
     accetta_regole_ingaggio
   } = req.body;
 
-  // Tipo di veicolo: scooter (default, comportamento di sempre), bici o
-  // minicar. La bici non ha una targa, quindi per lei non la richiediamo;
-  // per scooter e minicar (veicoli veri e propri) resta obbligatoria.
-  const tipiVeicoloValidi = ['scooter', 'bici', 'minicar'];
+  // Tipo di veicolo: scooter (default, comportamento di sempre), bici,
+  // minicar, cargo bike o monopattino. La bici non ha una targa, quindi
+  // per lei non la richiediamo; per tutti gli altri (veicoli veri e
+  // propri, che devono anche essere omologati) resta obbligatoria.
+  const tipiVeicoloValidi = ['scooter', 'bici', 'minicar', 'cargo_bike', 'monopattino'];
   const tipoVeicoloFinale = tipiVeicoloValidi.includes(tipo_veicolo)
     ? tipo_veicolo
     : 'scooter';
@@ -91,11 +97,12 @@ router.post('/registra/conducente', async (req, res) => {
   }
 
   // Il tipo di servizio è opzionale: se non specificato (o non valido) il
-  // conducente viene registrato per entrambi i servizi. La bici però non
-  // può mai trasportare persone: qualunque cosa arrivi dal client, per lei
-  // forziamo "solo pacchi" anche qui lato server, non solo in app.
+  // conducente viene registrato per entrambi i servizi. Bici, cargo bike e
+  // monopattino però non possono mai trasportare persone: qualunque cosa
+  // arrivi dal client, per loro forziamo "solo pacchi" anche qui lato
+  // server, non solo in app.
   const tipiServizioValidi = ['passeggeri', 'pacchi', 'entrambi'];
-  const tipoServizioFinale = tipoVeicoloFinale === 'bici'
+  const tipoServizioFinale = VEICOLI_SOLO_CONSEGNE.includes(tipoVeicoloFinale)
     ? 'pacchi'
     : (tipiServizioValidi.includes(tipo_servizio) ? tipo_servizio : 'entrambi');
 
@@ -241,16 +248,16 @@ router.put('/tipo-servizio', require('../middleware/auth').verificaToken, async 
   }
 
   try {
-    // La bici non può mai offrire passaggi persone: se chi ha una bici
-    // prova a impostare "passeggeri" o "entrambi" (es. app non aggiornata),
-    // lo blocchiamo qui, non solo in app.
+    // Bici, cargo bike e monopattino non possono mai offrire passaggi
+    // persone: se chi ne ha uno prova a impostare "passeggeri" o "entrambi"
+    // (es. app non aggiornata), lo blocchiamo qui, non solo in app.
     const conducente = await pool.query(
       `SELECT tipo_veicolo FROM conducenti WHERE user_id = $1`,
       [req.utente.id]
     );
-    if (conducente.rows[0]?.tipo_veicolo === 'bici' && tipo_servizio !== 'pacchi') {
+    if (VEICOLI_SOLO_CONSEGNE.includes(conducente.rows[0]?.tipo_veicolo) && tipo_servizio !== 'pacchi') {
       return res.status(400).json({
-        errore: 'Con una bici puoi offrire solo consegne di piccoli pacchi, non passaggi persone'
+        errore: 'Con questo mezzo puoi offrire solo consegne pacchi, non passaggi persone'
       });
     }
 

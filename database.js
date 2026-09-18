@@ -409,6 +409,22 @@ const initDatabase = async () => {
       ALTER TABLE segnalazioni_smarrimento
         ADD COLUMN IF NOT EXISTS categoria VARCHAR(30) NOT NULL DEFAULT 'smarrimento'
           CHECK (categoria IN ('smarrimento', 'danneggiato', 'non_arrivato', 'incidente', 'pagamento'));
+
+      -- ================================
+      -- NUOVI MEZZI: cargo bike e monopattino
+      -- ================================
+      -- Come la bici, sono dedicati alle sole consegne: mai passaggi
+      -- persone (un monopattino non può legalmente trasportare un
+      -- passeggero, e un cargo bike è pensato per il carico, non per una
+      -- persona a bordo) — vedi routes/auth.js. A differenza della bici,
+      -- però, devono essere omologati e targati: seguono quindi la stessa
+      -- regola di scooter/minicar sulla targa obbligatoria, non quella
+      -- della bici (vedi Regole d'ingaggio in app). Bisogna ricreare il
+      -- vincolo CHECK per ammettere i nuovi valori.
+      ALTER TABLE conducenti DROP CONSTRAINT IF EXISTS conducenti_tipo_veicolo_check;
+      ALTER TABLE conducenti
+        ADD CONSTRAINT conducenti_tipo_veicolo_check
+        CHECK (tipo_veicolo IN ('scooter', 'bici', 'minicar', 'cargo_bike', 'monopattino'));
     `);
     console.log('✅ Database inizializzato correttamente');
   } catch (err) {

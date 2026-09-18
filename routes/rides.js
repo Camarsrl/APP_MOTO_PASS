@@ -147,9 +147,11 @@ router.get('/disponibili', verificaToken, async (req, res) => {
   }
 
   try {
-    // Bici e conducenti impostati su "solo pacchi" non fanno passaggi:
-    // lista vuota, non un errore, perché è una condizione normale (in app
-    // questa schermata non è comunque raggiungibile in quel caso).
+    // Bici, cargo bike, monopattino e conducenti impostati su "solo
+    // pacchi" non fanno passaggi (per loro tipo_servizio è comunque sempre
+    // forzato a "pacchi", vedi routes/auth.js): lista vuota, non un errore,
+    // perché è una condizione normale (in app questa schermata non è
+    // comunque raggiungibile in quel caso).
     const profilo = await pool.query(
       `SELECT tipo_veicolo, tipo_servizio FROM conducenti WHERE user_id = $1`,
       [req.utente.id]
@@ -282,9 +284,10 @@ router.put('/:id/accetta', verificaToken, async (req, res) => {
   }
 
   try {
-    // Stessa regola di GET /disponibili, controllata di nuovo qui: una bici
-    // (o un profilo impostato su "solo pacchi") non può accettare un
-    // passaggio persone, anche chiamando questa API direttamente.
+    // Stessa regola di GET /disponibili, controllata di nuovo qui: bici,
+    // cargo bike, monopattino (o un profilo impostato su "solo pacchi")
+    // non possono accettare un passaggio persone, anche chiamando questa
+    // API direttamente.
     const profilo = await pool.query(
       `SELECT tipo_veicolo, tipo_servizio FROM conducenti WHERE user_id = $1`,
       [req.utente.id]
